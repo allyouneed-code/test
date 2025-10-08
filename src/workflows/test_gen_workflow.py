@@ -1,6 +1,8 @@
 import json
 import os
-from typing import TypedDict, Literal
+import time
+from typing import TypedDict, Literal, Dict, Any
+from langchain_community.callbacks import get_openai_callback
 from langchain.chat_models import init_chat_model
 from langgraph.graph import StateGraph, START, END
 from pydantic import BaseModel, Field
@@ -53,17 +55,27 @@ os.environ["OPENAI_API_BASE"] = "https://api.chatanywhere.tech/v1"
 
 class WorkflowState(TypedDict):
     """定义工作流中传递的状态"""
+    # 核心数据
     code: str                  # 待测试的源代码
     requirement: str           # 用户的测试需求
     analysis_report: str       # 代码静态分析报告 (JSON 字符串)
     generation_prompt: str     # 用于生成测试用例的最终 Prompt
     test_code: str             # 生成的测试用例代码
+    
+    # 结果与迭代
     coverage: float            # 测试覆盖率
     pass_rate: float           # 测试通过率
     execution_feedback: str    # 来自测试执行器的反馈 (例如，未覆盖的行)
     evaluation_result: str     # 评估者的最终决定 ("pass" or "not pass")
     evaluation_feedback: str   # 评估者给出的改进建议
     retry_count: int           # 重试次数
+    
+    # 新增：成本与效率指标
+    start_time: float               # 工作流开始时间戳
+    total_execution_time: float     # 总执行时间
+    total_prompt_tokens: int        # 累计 Prompt Token 消耗
+    total_completion_tokens: int    # 累计 Completion Token 消耗
+    total_tokens: int               # 累计总 Token 消耗
 
 class TestEvaluation(BaseModel):
     """用于评估器结构化输出的 Schema"""
@@ -78,7 +90,7 @@ class TestEvaluation(BaseModel):
 
 class TestGenerationWorkflow:
     """
-    一个完整的、基于图的自动化测试生成工作流。
+    基于图的自动化测试生成工作流。
     集成了代码分析、测试生成、代码执行和循环评估。
     """
     def __init__(self, config: dict):
@@ -157,9 +169,12 @@ class TestGenerationWorkflow:
         if state.get("evaluation_feedback"):
             print("  -> Incorporating feedback from previous run.")
             prompt += f"\n**Feedback from previous attempt (Please address these issues):**\n{state['evaluation_feedback']}"
-
-        response = self.llm.invoke(prompt)
         
+        # 使用 get_openai_callback 上下文管理器来追踪 Token
+        with get_openai_callback() as cb:
+            response = self.llm.invoke(prompt)
+            print(f"  -> LLM Call Tokens: {cb.total_tokens} (Prompt: {cb.prompt_tokens}, Completion: {cb.completion_tokens})")
+
         # 查找被 ```python 和 ``` 包围的代码块
         try:
             # 通常 LLM 的返回格式是 ```python\n...code...\n```
@@ -175,7 +190,12 @@ class TestGenerationWorkflow:
         # ==================== 修改结束 ====================
         
         print("  -> Extracted Test Code:\n", test_code) # 增加一行打印，方便调试
-        return {"test_code": test_code}
+        return {
+            "test_code": test_code,
+            "total_prompt_tokens": state["total_prompt_tokens"] + cb.prompt_tokens,
+            "total_completion_tokens": state["total_completion_tokens"] + cb.completion_tokens,
+            "total_tokens": state["total_tokens"] + cb.total_tokens,
+        }
 
     def test_executor_node(self, state: WorkflowState) -> dict:
         """
@@ -225,6 +245,7 @@ class TestGenerationWorkflow:
                 grade="pass",
                 feedback="The test suite meets all quality standards."
             )
+            cb = None # 无需调用LLM，cb为空
         else:
             # 如果客观指标不达标，才让 LLM 生成改进建议
             print("  -> Objective metrics not met. Generating feedback for improvement.")
@@ -237,18 +258,26 @@ class TestGenerationWorkflow:
             Please provide clear, actionable feedback on how to fix the tests to meet the requirements.
             """
 
-            feedback_response = self.llm.invoke(eval_prompt)
-            grade = TestEvaluation(
-                grade="not pass",
-                feedback=feedback_response.content
-            )
+            with get_openai_callback() as cb:
+                feedback_response = self.llm.invoke(eval_prompt)
+                grade = TestEvaluation(grade="not pass", feedback=feedback_response.content)
+            print(f"  -> LLM Call Tokens: {cb.total_tokens} (Prompt: {cb.prompt_tokens}, Completion: {cb.completion_tokens})")
+
 
         print(f"  -> Evaluation Grade: {grade.grade}")
-        return {
+        # 准备返回的数据，如果有LLM调用，则累加Token
+        return_data = {
             "evaluation_result": grade.grade,
             "evaluation_feedback": grade.feedback,
             "retry_count": current_retries + 1
         }
+        if cb:
+            return_data.update({
+                "total_prompt_tokens": state["total_prompt_tokens"] + cb.prompt_tokens,
+                "total_completion_tokens": state["total_completion_tokens"] + cb.completion_tokens,
+                "total_tokens": state["total_tokens"] + cb.total_tokens,
+            })
+        return return_data
 
     # ------------------------- 流程中的逻辑 (Edges) -------------------------
 
@@ -302,6 +331,57 @@ class TestGenerationWorkflow:
         )
 
         return graph.compile()
+    
+# ========================= 成本报告生成类 =========================
+class WorkflowReporter:
+    """
+    一个专门用于生成工作流结果报告的类。
+    """
+    def __init__(self, final_state: WorkflowState, config: Dict[str, Any]):
+        """
+        初始化报告器。
+
+        Args:
+            final_state: 工作流执行完毕后的最终状态。
+            config: 本次运行所使用的配置。
+        """
+        self.state = final_state
+        self.config = config
+
+    def _calculate_metrics(self):
+        """内部方法，计算并更新最终指标。"""
+        # 计算总执行时间
+        self.state["total_execution_time"] = time.time() - self.state["start_time"]
+        
+    def generate_report(self):
+        """
+        生成并打印完整的成本与效率报告。
+        """
+        self._calculate_metrics()
+        
+        final_result = self.state.get('evaluation_result', 'N/A').upper()
+        
+        print("\n" + "="*50 + "\n            WORKFLOW COMPLETED - FINAL REPORT\n" + "="*50)
+        
+        if self.state.get('retry_count', 0) >= self.config["max_retries"] and final_result == 'NOT PASS':
+            print(f"\n[WARNING] Workflow stopped due to reaching the maximum retry limit ({self.config['max_retries']}).")
+
+        print(f"\nFinal Evaluation Result: {final_result}")
+        print("\n--- Generated Test Code ---")
+        print(self.state.get('test_code', 'No code generated.'))
+        
+        print("\n" + "-"*20 + " Cost & Efficiency Metrics " + "-"*20)
+        print(f"  - Total Execution Time: {self.state['total_execution_time']:.2f} seconds")
+        print(f"  - Number of Iterations: {self.state.get('retry_count', 0)}")
+        print(f"  - Token Consumption:")
+        print(f"    - Total Prompt Tokens:    {self.state.get('total_prompt_tokens', 0)}")
+        print(f"    - Total Completion Tokens:  {self.state.get('total_completion_tokens', 0)}")
+        print(f"    - Grand Total Tokens:     {self.state.get('total_tokens', 0)}")
+        
+        print("\n" + "-"*20 + " Quality Metrics " + "-"*26)
+        print(f"  - Final Coverage: {self.state.get('coverage', 0.0):.2%}")
+        print(f"  - Final Pass Rate: {self.state.get('pass_rate', 0.0):.2%}")
+        print("="*67)
 
 # ------------------------- 示例运行 -------------------------
 
@@ -341,10 +421,12 @@ def calculate(a, b, operation):
     print("           STARTING TEST GENERATION WORKFLOW           ")
     print("="*50 + "\n")
     
-    final_state = app.invoke({
-        "code": sample_logic_code,
-        "requirement": user_requirement
-    })
+    initial_state = {
+        "code": sample_logic_code, "requirement": user_requirement, "retry_count": 0,
+        "start_time": time.time(), "total_prompt_tokens": 0,
+        "total_completion_tokens": 0, "total_tokens": 0,
+    }
+    final_state = app.invoke(initial_state)
 
     # 6. 打印最终结果
     print("\n" + "="*50)
@@ -359,4 +441,5 @@ def calculate(a, b, operation):
     print(f"\n--- Execution Feedback ---")
     print(final_state.get('execution_feedback', 'N/A'))
     print("="*50)
-
+    reporter = WorkflowReporter(final_state, app_config)
+    reporter.generate_report()
