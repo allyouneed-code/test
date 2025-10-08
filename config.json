@@ -1,0 +1,6 @@
+{
+  "workflow_settings": {
+    "max_retries": 5,
+    "coverage_threshold": 0.9
+  }
+}

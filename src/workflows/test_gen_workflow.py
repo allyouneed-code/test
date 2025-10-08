@@ -1,153 +1,362 @@
 import json
-import openai
 import os
-from typing import Annotated
-from typing_extensions import TypedDict
+from typing import TypedDict, Literal
 from langchain.chat_models import init_chat_model
 from langgraph.graph import StateGraph, START, END
-from langgraph.graph.message import add_messages
-import ast
 from pydantic import BaseModel, Field
-from typing_extensions import Literal
-from IPython.display import Image, display
-from langchain_core.tools import tool
 
+# ------------------------- 导入自定义工具 -------------------------
+from ..tools.code_inspector import CodeAnalyzer
+from ..tools.code_executer import execute_tests_and_get_report
 
+# ------------------------- 导入配置 -------------------------
+def load_config():
+    """
+    加载配置的函数。
+    优先级顺序: 环境变量 > config.json > 默认值
+    """
+    # 1. 设置默认值
+    config = {
+        "max_retries": 3,
+        "coverage_threshold": 0.8
+    }
+
+    # 2. 尝试从 config.json 文件加载
+    try:
+        # 假设 config.json 在项目的根目录
+        config_path = os.path.join(os.path.dirname(__file__), '..', '..', 'config.json')
+        with open(config_path, 'r') as f:
+            file_config = json.load(f).get("workflow_settings", {})
+            config.update(file_config)
+            print("--- Loaded configuration from config.json ---")
+    except (FileNotFoundError, json.JSONDecodeError):
+        print("--- config.json not found or invalid, using default settings. ---")
+        pass # 文件不存在或格式错误则忽略
+
+    # 3. 检查环境变量进行覆盖
+    #    环境变量的值会被解析为整数或浮点数
+    if os.getenv("MAX_RETRIES"):
+        config["max_retries"] = int(os.getenv("MAX_RETRIES"))
+        print(f"--- Overridden max_retries with environment variable: {config['max_retries']} ---")
+    if os.getenv("COVERAGE_THRESHOLD"):
+        config["coverage_threshold"] = float(os.getenv("COVERAGE_THRESHOLD"))
+        print(f"--- Overridden coverage_threshold with environment variable: {config['coverage_threshold']} ---")
+        
+    return config
+
+# ------------------------- 环境配置 -------------------------
+# 建议使用环境变量管理 API Keys，而不是硬编码
 os.environ["OPENAI_API_KEY"] = "sk-OjjN3nmNeSZxEE8c2QJz985fdY3b9XegsKi7lTcl8z6Sr2de"
 os.environ["OPENAI_API_BASE"] = "https://api.chatanywhere.tech/v1"
 
+# ------------------------- 状态与模型定义 -------------------------
 
+class WorkflowState(TypedDict):
+    """定义工作流中传递的状态"""
+    code: str                  # 待测试的源代码
+    requirement: str           # 用户的测试需求
+    analysis_report: str       # 代码静态分析报告 (JSON 字符串)
+    generation_prompt: str     # 用于生成测试用例的最终 Prompt
+    test_code: str             # 生成的测试用例代码
+    coverage: float            # 测试覆盖率
+    pass_rate: float           # 测试通过率
+    execution_feedback: str    # 来自测试执行器的反馈 (例如，未覆盖的行)
+    evaluation_result: str     # 评估者的最终决定 ("pass" or "not pass")
+    evaluation_feedback: str   # 评估者给出的改进建议
+    retry_count: int           # 重试次数
 
-# State schema
-class State(TypedDict):
-    code: str
-    requirement: str
-    prompt: str
-    ast_info: str
-    test_code: str
-    coverage: float
-    pass_rate: float
-    feedback : str
-    results: str
-
-class Feedback(BaseModel):
+class TestEvaluation(BaseModel):
+    """用于评估器结构化输出的 Schema"""
     grade: Literal["pass", "not pass"] = Field(
-        description="Decide if the testcases is passed or not.",
+        description="根据测试结果（通过率、覆盖率）和反馈，决定测试用例是否达标。"
     )
     feedback: str = Field(
-        description="If the cases is not passed, provide feedback on how to improve it.",
+        description="如果测试用例不达标 (not pass)，提供清晰、具体的反馈，指导如何改进测试用例。"
     )
 
+# ------------------------- 工作流构建器 -------------------------
 
-class GraphBuilder:
-    # 为每个节点预设 system-level 回复模板
-    ORGANIZER_SYS = (
-        "You are the Prompt Organizer. "
-        "Take the user's requirement and source code (with AST info) "
-        "and package them into a single structured prompt."
-    )
-    GENERATOR_SYS = (
-        "You are the Test Generator. "
-        "Given a well-structured prompt, generate pytest-compatible unit tests. "
-        "Only output valid Python code in markdown fences."
-    )
-    EVALUATOR_SYS = (
-        "You are the Result Evaluator. "
-        "Given coverage and pass rate results, decide if the tests meet the quality thresholds. coverage>=80"
-        "If not, explain what failed."
-    )
+class TestGenerationWorkflow:
+    """
+    一个完整的、基于图的自动化测试生成工作流。
+    集成了代码分析、测试生成、代码执行和循环评估。
+    """
+    def __init__(self, config: dict):
+        self.llm = init_chat_model("openai:gpt-3.5-turbo-1106", temperature=0.2)
+        self.structured_evaluator = self.llm.with_structured_output(TestEvaluation)
+        # 从传入的配置字典中获取参数
+        self.coverage_threshold = config["coverage_threshold"]
+        self.max_retries = config["max_retries"]
 
-    def __init__(self):
-        self.llm = init_chat_model("openai:gpt-3.5-turbo")
-        self.graph = StateGraph(State)
-        # Augment the LLM with schema for structured output
-        self.evaluator = self.llm.with_structured_output(Feedback)
+    # ------------------------- 流程中的节点 (Nodes) -------------------------
 
-    def ast_analyze(self, state: State) -> str:
+    def code_analyzer_node(self, state: WorkflowState) -> dict:
         """
-        Perform static AST analysis on the provided code.
-        Returns a string representation of the AST.
+        节点1: 代码分析
+        使用 CodeAnalyzer 对源代码进行深度静态分析。
         """
-        tree = ast.parse(state["code"])
-        ast_info = ast.dump(tree, annotate_fields=True, include_attributes=False)
-        return {"ast_info": ast_info}
+        print("--- Step 1: Analyzing Source Code ---")
+        try:
+            analyzer = CodeAnalyzer(state["code"])
+            analysis_result = analyzer.analyze()
+            report_str = json.dumps(analysis_result, indent=2, ensure_ascii=False)
+            return {"analysis_report": report_str}
+        except Exception as e:
+            error_msg = f"Code analysis failed: {e}"
+            print(f"ERROR: {error_msg}")
+            # 如果分析失败，将错误信息放入报告中，以便后续节点处理
+            return {"analysis_report": json.dumps({"error": error_msg})}
 
-    # Node 1: Prompt Organizer
-    def prompt_organizer(self, state: State) -> dict:
-        code = state["code"]
-        msg = self.llm.invoke(
-                f"Write prompt about code:{state['code']} requirement:{state['requirement']} and ast_info"
-            )
-        # 构造供 LLM 使用的 prompt
-        return {"prompt": msg.content}
-
-    # Node 2: Test Generator
-    def test_generator(self, state: State) -> dict:
-        if state.get("feedback"):
-            resp = self.llm.invoke(
-                f"Write case about {state['prompt']} but take into account the feedback: {state['feedback']}"
-            )
-        else:
-            resp = self.llm.invoke(state["prompt"])
-        return {"test_code": resp.content}
-
-    # Node 3: Test Executor
-    def test_executor(self, state: State) -> dict:
-        # 从 prompt 里提取原始代码
-        test_code = state["test_code"]
-        return {"coverage": 0.9, "pass_rate": 0.9}
-
-    # Node 4: Result Evaluator
-    def result_evaluator(self, state: State) -> dict:
-        grade = self.evaluator.invoke(f"Grade the case {state['test_code']} with coverage {state['coverage']} and pass rate {state['pass_rate']}")
-        return {"results": grade.grade, "feedback": grade.feedback}
-    
-    def route_case(self,state: State):
-        if state["results"] == "pass":
-            return "Accepted"
-        elif state["results"] == "not pass":
-            return "Rejected + Feedback"
+    def prompt_organizer_node(self, state: WorkflowState) -> dict:
+        """
+        节点2: Prompt 组织
+        整合用户需求和代码分析报告，构建一个高质量的 Prompt。
+        """
+        print("--- Step 2: Organizing Prompt ---")
         
-    def check_ast(self, state: State) -> str:
+        # 获取 code_executer.py 中定义的源文件名
+        # 理论上这个也应该来自配置文件，但为了快速修复，我们先在这里直接使用
+        source_module_name = "logic_module"
+
+        prompt_template = f"""
+        **Goal:** Generate a comprehensive pytest test suite.
+
+        **Source Code Module Name:** `{source_module_name}`
+
+        **User's Requirement:**
+        {state['requirement']}
+
+        **Source Code to Test:**
+        ```python
+        {state['code']}
+        ```
+
+        **Static Code Analysis Report:**
+        This report provides deep insights into the code's structure, complexity, and potential issues. Use it to guide your test case design.
+        ```json
+        {state['analysis_report']}
+        ```
+
+        **Task:**
+        Based on all the information above, write a pytest test suite.
+        - **Crucially, you MUST import the functions to be tested from the `{source_module_name}` module.** For example: `from {source_module_name} import your_function_name`.
+        - The test code must be complete and runnable.
+        - ONLY output the Python code for the test suite inside markdown fences (```python ... ```). Do not include any other text or explanation.
         """
-        Check if the AST info is present in the state.
-        If not, perform AST analysis.
+        return {"generation_prompt": prompt_template}
+    
+    def test_generator_node(self, state: WorkflowState) -> dict:
         """
-        if not state["ast_info"]:
-            return "ast_analyze"
+        节点3: 测试用例生成
+        调用 LLM，根据 Prompt 生成测试代码。
+        如果存在上一轮的反馈，会一并考虑。
+        """
+        print("--- Step 3: Generating Test Cases ---")
+        
+        prompt = state["generation_prompt"]
+        if state.get("evaluation_feedback"):
+            print("  -> Incorporating feedback from previous run.")
+            prompt += f"\n**Feedback from previous attempt (Please address these issues):**\n{state['evaluation_feedback']}"
+
+        response = self.llm.invoke(prompt)
+        
+        # 查找被 ```python 和 ``` 包围的代码块
+        try:
+            # 通常 LLM 的返回格式是 ```python\n...code...\n```
+            test_code = response.content.split("```python")[1].split("```")[0].strip()
+        except IndexError:
+            # 如果格式不是 ```python，尝试通用的 ```
+            try:
+                test_code = response.content.split("```")[1].split("```")[0].strip()
+            except IndexError:
+                # 如果连 ``` 都没有，就认为整个返回都是代码（作为最后的备用方案）
+                print("  -> WARNING: Could not find markdown fences. Assuming entire response is code.")
+                test_code = response.content.strip()
+        # ==================== 修改结束 ====================
+        
+        print("  -> Extracted Test Code:\n", test_code) # 增加一行打印，方便调试
+        return {"test_code": test_code}
+
+    def test_executor_node(self, state: WorkflowState) -> dict:
+        """
+        节点4: 测试执行与评估
+        使用 CodeExecutor 真实地运行测试并获取覆盖率等指标。
+        """
+        print("--- Step 4: Executing Tests and Gathering Metrics ---")
+        logic_code = state["code"]
+        test_code = state["test_code"]
+
+        report = execute_tests_and_get_report(logic_code, test_code)
+
+        if "error" in report:
+            print(f"  -> Execution Error: {report['error']}")
+            return {
+                "coverage": 0.0,
+                "pass_rate": 0.0,
+                "execution_feedback": f"Test execution failed: {report['error']}"
+            }
+
+        coverage = report.get('coverage_metrics', {}).get('covered_percentage', 0.0) / 100.0
+        pass_rate = report.get('test_execution', {}).get('pass_rate', 0.0)
+        missing_lines = report.get('coverage_metrics', {}).get('missing_lines', 'None')
+
+        feedback = f"Coverage: {coverage:.2%}, Pass Rate: {pass_rate:.2%}. Missing lines: {missing_lines}"
+        print(f"  -> Execution Result: {feedback}")
+        
+        return {
+            "coverage": coverage,
+            "pass_rate": pass_rate,
+            "execution_feedback": feedback
+        }
+
+    def result_evaluator_node(self, state: WorkflowState) -> dict:
+        """
+        节点5: 结果评估 
+        优先使用客观指标进行判断，只有在不达标时才让 LLM 生成反馈。
+        """
+        print("--- Step 5: Evaluating Results ---")
+        current_retries = state.get('retry_count', 0)
+        
+        # 核心修改：将客观判断放在首位
+        if state["pass_rate"] >= 1.0 and state["coverage"] >= self.coverage_threshold:
+            # 如果客观指标达标，直接通过，不再询问 LLM
+            print("  -> Objective metrics met. Test suite accepted.")
+            grade = TestEvaluation(
+                grade="pass",
+                feedback="The test suite meets all quality standards."
+            )
         else:
-            return "next"
+            # 如果客观指标不达标，才让 LLM 生成改进建议
+            print("  -> Objective metrics not met. Generating feedback for improvement.")
+            eval_prompt = f"""
+            The generated test suite is not satisfactory based on the following results:
+            - Pass Rate: {state['pass_rate']:.2%} (must be 100%)
+            - Coverage Rate: {state['coverage']:.2%} (must be >= {self.coverage_threshold:.0%})
+            - Execution Feedback: {state['execution_feedback']}
+
+            Please provide clear, actionable feedback on how to fix the tests to meet the requirements.
+            """
+
+            feedback_response = self.llm.invoke(eval_prompt)
+            grade = TestEvaluation(
+                grade="not pass",
+                feedback=feedback_response.content
+            )
+
+        print(f"  -> Evaluation Grade: {grade.grade}")
+        return {
+            "evaluation_result": grade.grade,
+            "evaluation_feedback": grade.feedback,
+            "retry_count": current_retries + 1
+        }
+
+    # ------------------------- 流程中的逻辑 (Edges) -------------------------
+
+    def route_decision(self, state: WorkflowState) -> Literal["continue", "end"]:
+        """
+        条件分支: 根据评估结果决定是结束还是重新生成。
+        """
+        print("--- Step 6: Making Decision ---")
+        if state["evaluation_result"] == "pass":
+            print("  -> Decision: Test suite accepted. Workflow ends.")
+            return "end"
+        
+        # 如果测试未通过，检查重试次数
+        if state["retry_count"] >= self.max_retries:
+            print(f"  -> Decision: Maximum retries ({self.max_retries}) reached. Forcing workflow to end.")
+            return "force_end"
+        else:
+            print("  -> Decision: Test suite rejected. Looping back to generator.")
+            return "continue"
+
+    # ------------------------- 构建计算图 -------------------------
 
     def build(self):
-        # 注册节点
-        self.graph.add_node("organizer", self.prompt_organizer)
-        self.graph.add_node("designer", self.test_generator)
-        self.graph.add_node("generator", self.test_executor)
-        self.graph.add_node("evaluator", self.result_evaluator)
+        """
+        将所有节点和逻辑边组装成一个可执行的 LangGraph 计算图。
+        """
+        graph = StateGraph(WorkflowState)
 
-        # 构建有向图
-        self.graph.add_edge(START, "organizer")
-        self.graph.add_edge("organizer", "designer")
-        self.graph.add_edge("designer", "generator")
-        self.graph.add_edge("generator", "evaluator")
-        # 失败则回到 organizer 重试，成功则结束
-        self.graph.add_conditional_edges(
-            "evaluator",
-            self.route_case,
-            {  # Name returned by route_joke : Name of next node to visit
-                "Accepted": END,
-                "Rejected + Feedback": "organizer",
+        # 注册所有节点
+        graph.add_node("code_analyzer", self.code_analyzer_node)
+        graph.add_node("prompt_organizer", self.prompt_organizer_node)
+        graph.add_node("test_generator", self.test_generator_node)
+        graph.add_node("test_executor", self.test_executor_node)
+        graph.add_node("result_evaluator", self.result_evaluator_node)
+
+        # 定义工作流的执行路径
+        graph.set_entry_point("code_analyzer")
+        graph.add_edge("code_analyzer", "prompt_organizer")
+        graph.add_edge("prompt_organizer", "test_generator")
+        graph.add_edge("test_generator", "test_executor")
+        graph.add_edge("test_executor", "result_evaluator")
+
+        # 添加条件分支
+        graph.add_conditional_edges(
+            "result_evaluator",
+            self.route_decision,
+            {
+                "end": END,
+                "continue": "test_generator", # 如果失败，回到生成器进行重试
             },
         )
-        return self.graph.compile()
+
+        return graph.compile()
+
+# ------------------------- 示例运行 -------------------------
 
 if __name__ == "__main__":
-    builder = GraphBuilder()
-    graph = builder.build()
-    # example usage
-    # state = graph.invoke({"requirement": "Cover edge cases for divide by zero", "code": "def div(a, b): return a/b"})
-    # print(state["test_code"])
-    png_bytes = graph.get_graph().draw_mermaid_png()
-    with open("my_graph.png", "wb") as f:
-        f.write(png_bytes)
+    # 1. 加载配置
+    app_config = load_config()
+
+    # 2. 定义待测试的业务逻辑代码
+    sample_logic_code = """
+def calculate(a, b, operation):
+    if not isinstance(a, (int, float)) or not isinstance(b, (int, float)):
+        raise TypeError("Inputs must be numeric")
+    if operation == 'add':
+        return a + b
+    if operation == 'subtract':
+        return a - b
+    # 故意留下未被良好测试的分支
+    if operation == 'multiply':
+        return a * b
+    if operation == 'divide':
+        if b == 0:
+            return "Error: Division by zero"
+        return a / b
+    return None
+"""
+
+    # 3. 用户的测试需求
+    user_requirement = "Write a comprehensive test suite for the 'calculate' function. Ensure all operations ('add', 'subtract', 'multiply', 'divide') are tested. Also, specifically test the edge case of division by zero and invalid input types."
+
+    # 4. 初始化并构建工作流
+    workflow_builder = TestGenerationWorkflow(config=app_config)
+    app = workflow_builder.build()
+    
+
+    # 5. 执行工作流
+    print("\n" + "="*50)
+    print("           STARTING TEST GENERATION WORKFLOW           ")
+    print("="*50 + "\n")
+    
+    final_state = app.invoke({
+        "code": sample_logic_code,
+        "requirement": user_requirement
+    })
+
+    # 6. 打印最终结果
+    print("\n" + "="*50)
+    print("            WORKFLOW COMPLETED - FINAL STATE            ")
+    print("="*50)
+    print(f"\nFinal Evaluation Result: {final_state.get('evaluation_result', 'N/A').upper()}")
+    print("\n--- Generated Test Code ---")
+    print(final_state.get('test_code', 'No code generated.'))
+    print("\n--- Final Execution Metrics ---")
+    print(f"  - Coverage: {final_state.get('coverage', 0.0):.2%}")
+    print(f"  - Pass Rate: {final_state.get('pass_rate', 0.0):.2%}")
+    print(f"\n--- Execution Feedback ---")
+    print(final_state.get('execution_feedback', 'N/A'))
+    print("="*50)
 
