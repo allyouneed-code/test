@@ -4,11 +4,9 @@ import glob
 import json
 import re
 import shutil 
+import textwrap
 
-# --- 配置 ---
-# 业务逻辑文件名\测试文件名\覆盖率 JSON 文件名
-LOGIC_FILENAME = "logic_module.py"
-TEST_FILENAME = "test_script.py"
+# --- 配置 ---覆盖率 JSON 文件名
 COV_JSON_FILE = "coverage.json"
 
 def _write_code_to_file(content, filename):
@@ -24,7 +22,7 @@ def _write_code_to_file(content, filename):
         print(f"写入文件 {filename} 时出错: {e}")
         return False
 
-def _run_pytest_with_coverage():
+def _run_pytest_with_coverage(test_filename: str):
     """使用 coverage run -m pytest 执行测试，并返回 subprocess.run 结果。"""
     
     # 构造 Pytest Coverage 运行命令
@@ -34,7 +32,7 @@ def _run_pytest_with_coverage():
     coverage_command = [
         "coverage", "run", "--parallel-mode", 
         "--source=.",  # <--- 确保使用 '.' 来追踪当前目录
-        "-m", "pytest", TEST_FILENAME
+        "-m", "pytest", test_filename
     ]
     
     print(f"\n[Executor] Running tests: {' '.join(coverage_command)}")
@@ -183,7 +181,7 @@ def _cleanup(files_to_clean):
 #                         AGENT TOOL ENTRY POINT
 # ----------------------------------------------------------------------
 
-def execute_tests_and_get_report(logic_code: str, test_code: str, logic_filename: str = LOGIC_FILENAME) -> dict:
+def execute_tests_and_get_report(logic_code: str, test_code: str, logic_filename: str, test_filename: str) -> dict:
     """
     Agent Tool 的主要入口点。
     将业务逻辑代码和 Pytest 测试代码写入文件，执行测试，并返回结构化的报告。
@@ -198,16 +196,16 @@ def execute_tests_and_get_report(logic_code: str, test_code: str, logic_filename
     """
     
     # 确保 logic_filename 和 TEST_FILENAME 存在于清理列表
-    files_to_clean = [logic_filename, TEST_FILENAME, COV_JSON_FILE]
+    files_to_clean = [logic_filename, test_filename, COV_JSON_FILE]
     final_report = {'test_execution': {}, 'coverage_metrics': {}}
     
     try:
         # --- 1. 写入文件 ---
         if not _write_code_to_file(logic_code, logic_filename): return {'error': f"Failed to write logic code to {logic_filename}"}
-        if not _write_code_to_file(test_code, TEST_FILENAME): return {'error': f"Failed to write test code to {TEST_FILENAME}"}
+        if not _write_code_to_file(test_code, test_filename): return {'error': f"Failed to write test code to {TEST_FILENAME}"}
 
         # --- 2. 执行测试 ---
-        pytest_result = _run_pytest_with_coverage()
+        pytest_result = _run_pytest_with_coverage(test_filename)
         
         # --- 3. 收集指标 ---
         final_report['test_execution'] = _parse_pytest_summary(pytest_result.stdout)
@@ -235,7 +233,8 @@ def execute_tests_and_get_report(logic_code: str, test_code: str, logic_filename
 # ----------------------------------------------------------------------
 
 if __name__ == "__main__":
-    
+    LOGIC_FILENAME = "logic_module.py"
+    TEST_FILENAME = "test_script.py"
     # 1. 业务逻辑代码
     sample_logic_code = """
 def calculate(a, b, operation):

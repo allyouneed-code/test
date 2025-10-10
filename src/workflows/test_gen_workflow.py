@@ -1,7 +1,7 @@
 import json
 import os
 import time
-from typing import TypedDict, Literal, Dict, Any
+from typing import TypedDict, Literal, Dict, Any, List
 from langchain_community.callbacks import get_openai_callback
 from langchain.chat_models import init_chat_model
 from langgraph.graph import StateGraph, START, END
@@ -21,30 +21,23 @@ def load_config():
     # 1. 设置默认值
     config = {
         "max_retries": 3,
-        "coverage_threshold": 0.8
+        "coverage_threshold": 0.8,
+        "logic_filename": "logic_module.py",
+        "test_filename": "test_script.py"
     }
 
     # 2. 尝试从 config.json 文件加载
     try:
         # 假设 config.json 在项目的根目录
         config_path = os.path.join(os.path.dirname(__file__), '..', '..', 'config.json')
-        with open(config_path, 'r') as f:
-            file_config = json.load(f).get("workflow_settings", {})
-            config.update(file_config)
-            print("--- Loaded configuration from config.json ---")
+        with open(config_path, 'r', encoding='utf-8') as f:
+            file_config = json.load(f)
+            config.update(file_config.get("workflow_settings", {}))
+            config.update(file_config.get("code_executer_settings", {})) 
     except (FileNotFoundError, json.JSONDecodeError):
         print("--- config.json not found or invalid, using default settings. ---")
         pass # 文件不存在或格式错误则忽略
-
-    # 3. 检查环境变量进行覆盖
-    #    环境变量的值会被解析为整数或浮点数
-    if os.getenv("MAX_RETRIES"):
-        config["max_retries"] = int(os.getenv("MAX_RETRIES"))
-        print(f"--- Overridden max_retries with environment variable: {config['max_retries']} ---")
-    if os.getenv("COVERAGE_THRESHOLD"):
-        config["coverage_threshold"] = float(os.getenv("COVERAGE_THRESHOLD"))
-        print(f"--- Overridden coverage_threshold with environment variable: {config['coverage_threshold']} ---")
-        
+  
     return config
 
 # ------------------------- 环境配置 -------------------------
@@ -53,6 +46,13 @@ os.environ["OPENAI_API_KEY"] = "sk-OjjN3nmNeSZxEE8c2QJz985fdY3b9XegsKi7lTcl8z6Sr
 os.environ["OPENAI_API_BASE"] = "https://api.chatanywhere.tech/v1"
 
 # ------------------------- 状态与模型定义 -------------------------
+class IterationLog(TypedDict):
+    """记录单次迭代的关键信息"""
+    iteration: int
+    test_code: str
+    pass_rate: float
+    coverage: float
+    feedback: str
 
 class WorkflowState(TypedDict):
     """定义工作流中传递的状态"""
@@ -71,6 +71,7 @@ class WorkflowState(TypedDict):
     evaluation_result: str     # 评估者的最终决定 ("pass" or "not pass")
     evaluation_feedback: str   # 评估者给出的改进建议
     retry_count: int           # 重试次数
+    iteration_history: List[IterationLog] # 迭代日志
     
     # 新增：成本与效率指标
     start_time: float               # 工作流开始时间戳
@@ -101,6 +102,8 @@ class TestGenerationWorkflow:
         # 从传入的配置字典中获取参数
         self.coverage_threshold = config["coverage_threshold"]
         self.max_retries = config["max_retries"]
+        self.logic_filename = config["logic_filename"]
+        self.test_filename = config["test_filename"]
 
     # ------------------------- 流程中的节点 (Nodes) -------------------------
 
@@ -144,15 +147,11 @@ class TestGenerationWorkflow:
         整合用户需求和代码分析报告，构建一个高质量的 Prompt。
         """
         print("--- Step 3: Organizing Prompt ---")
-        
-        # 获取 code_executer.py 中定义的源文件名
-        # 理论上这个也应该来自配置文件，但为了快速修复，我们先在这里直接使用
-        source_module_name = "logic_module"
 
         prompt_template = f"""
         **目标:** 生成一个全面的 pytest 测试套件。
 
-        **源代码模块名:** `{source_module_name}`
+        **源代码模块名:** `{self.logic_filename}`
 
         **用户原始需求:**
         {state['requirement']}
@@ -176,7 +175,7 @@ class TestGenerationWorkflow:
 
         **任务:**
         基于以上所有信息，，编写一个 pytest 测试套件。
-        - **至关重要，您必须从 `{source_module_name}` 模块导入待测试的函数。** 例如: `from {source_module_name} import your_function_name`。
+        - **至关重要，您必须从 `{self.logic_filename}` 模块导入待测试的函数。** 例如: `from {self.logic_filename} import your_function_name`。
         - 测试代码必须是完整且可运行的。
         - 确保您生成的测试覆盖了结构化分析中概述的所有场景。
         - **只在 markdown 的代码块 (```python ... ```) 中输出测试套件的 Python 代码。** 不要包含任何其他文本或解释。
@@ -232,7 +231,12 @@ class TestGenerationWorkflow:
         logic_code = state["code"]
         test_code = state["test_code"]
 
-        report = execute_tests_and_get_report(logic_code, test_code)
+        report = execute_tests_and_get_report(
+            state["code"],
+            state["test_code"],
+            logic_filename=self.logic_filename,
+            test_filename=self.test_filename
+        )
 
         if "error" in report:
             print(f"  -> Execution Error: {report['error']}")
@@ -289,13 +293,28 @@ class TestGenerationWorkflow:
                 grade = TestEvaluation(grade="not pass", feedback=feedback_response.content)
             print(f"  -> LLM Call Tokens: {cb.total_tokens} (Prompt: {cb.prompt_tokens}, Completion: {cb.completion_tokens})")
 
+        # --- 打印迭代总结 ---
+        print("\n" + "="*20 + f" Iteration #{current_retries + 1} Summary " + "="*20)
+        if grade.grade == "not pass":
+            print(f"  - AI Feedback for Next Round: {grade.feedback}")
+        print("="*61)
+
+        history = state.get("iteration_history", [])
+        history.append({
+            "iteration": current_retries + 1,
+            "test_code": state["test_code"],
+            "pass_rate": state["pass_rate"],
+            "coverage": state["coverage"],
+            "feedback": grade.feedback
+        })
 
         print(f"  -> Evaluation Grade: {grade.grade}")
         # 准备返回的数据，如果有LLM调用，则累加Token
         return_data = {
             "evaluation_result": grade.grade,
             "evaluation_feedback": grade.feedback,
-            "retry_count": current_retries + 1
+            "retry_count": current_retries + 1,
+            "iteration_history": history
         }
         if cb:
             return_data.update({
@@ -400,7 +419,7 @@ class WorkflowReporter:
         
         print("\n" + "-"*20 + " Cost & Efficiency Metrics " + "-"*20)
         print(f"  - Total Execution Time: {self.state['total_execution_time']:.2f} seconds")
-        print(f"  - Number of Iterations: {self.state.get('retry_count', 0)}")
+        print(f"  - Total Iterations: {self.state.get('retry_count', 0)}")
         print(f"  - Token Consumption:")
         print(f"    - Total Prompt Tokens:    {self.state.get('total_prompt_tokens', 0)}")
         print(f"    - Total Completion Tokens:  {self.state.get('total_completion_tokens', 0)}")
@@ -453,21 +472,10 @@ def calculate(a, b, operation):
         "code": sample_logic_code, "requirement": user_requirement, "retry_count": 0,
         "start_time": time.time(), "total_prompt_tokens": 0,
         "total_completion_tokens": 0, "total_tokens": 0,
+        "iteration_history": [],
     }
     final_state = app.invoke(initial_state)
 
     # 6. 打印最终结果
-    print("\n" + "="*50)
-    print("            WORKFLOW COMPLETED - FINAL STATE            ")
-    print("="*50)
-    print(f"\nFinal Evaluation Result: {final_state.get('evaluation_result', 'N/A').upper()}")
-    print("\n--- Generated Test Code ---")
-    print(final_state.get('test_code', 'No code generated.'))
-    print("\n--- Final Execution Metrics ---")
-    print(f"  - Coverage: {final_state.get('coverage', 0.0):.2%}")
-    print(f"  - Pass Rate: {final_state.get('pass_rate', 0.0):.2%}")
-    print(f"\n--- Execution Feedback ---")
-    print(final_state.get('execution_feedback', 'N/A'))
-    print("="*50)
     reporter = WorkflowReporter(final_state, app_config)
     reporter.generate_report()

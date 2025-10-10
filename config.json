@@ -2,5 +2,9 @@
   "workflow_settings": {
     "max_retries": 5,
     "coverage_threshold": 0.9
+  },
+  "code_executer_settings": {
+    "logic_filename": "logic_module.py",
+    "test_filename": "test_script.py"
   }
 }
