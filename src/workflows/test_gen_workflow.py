@@ -228,8 +228,6 @@ class TestGenerationWorkflow:
         使用 CodeExecutor 真实地运行测试并获取覆盖率等指标。
         """
         print("--- Step 5: Executing Tests and Gathering Metrics ---")
-        logic_code = state["code"]
-        test_code = state["test_code"]
 
         report = execute_tests_and_get_report(
             state["code"],
@@ -238,19 +236,27 @@ class TestGenerationWorkflow:
             test_filename=self.test_filename
         )
 
+        execution_feedback_parts = []
         if "error" in report:
-            print(f"  -> Execution Error: {report['error']}")
-            return {
-                "coverage": 0.0,
-                "pass_rate": 0.0,
-                "execution_feedback": f"Test execution failed: {report['error']}"
-            }
+            coverage, pass_rate = 0.0, 0.0
+            execution_feedback_parts.append(f"Test execution failed: {report['error']}")
+        else:
+            test_exec = report.get('test_execution', {})
+            cov_metrics = report.get('coverage_metrics', {})
+            
+            coverage = cov_metrics.get('covered_percentage', 0.0) / 100.0
+            pass_rate = test_exec.get('pass_rate', 0.0)
+            
+            execution_feedback_parts.append(f"Coverage: {coverage:.2%}, Pass Rate: {pass_rate:.2%}.")
+            if missing_lines := cov_metrics.get('missing_lines'):
+                execution_feedback_parts.append(f"Missing lines: {missing_lines}.")
+            
+            # 将详细的失败日志添加到反馈中
+            if failed_cases := test_exec.get('failed_cases_details'):
+                failed_cases_str = "\n".join(failed_cases)
+                execution_feedback_parts.append(f"\n--- FAILED CASE DETAILS ---\n{failed_cases_str}\n---------------------------")
 
-        coverage = report.get('coverage_metrics', {}).get('covered_percentage', 0.0) / 100.0
-        pass_rate = report.get('test_execution', {}).get('pass_rate', 0.0)
-        missing_lines = report.get('coverage_metrics', {}).get('missing_lines', 'None')
-
-        feedback = f"Coverage: {coverage:.2%}, Pass Rate: {pass_rate:.2%}. Missing lines: {missing_lines}"
+        feedback = " ".join(execution_feedback_parts)
         print(f"  -> Execution Result: {feedback}")
         
         return {

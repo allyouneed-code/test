@@ -79,6 +79,16 @@ def _parse_pytest_summary(output):
             
     if summary['total_tests'] > 0:
         summary['pass_rate'] = round(summary['passed'] / summary['total_tests'], 4)
+    
+    if summary['failed'] > 0:
+        failures_match = re.search(r"={10,}\s+FAILURES\s+={10,}(.*?)={10,}\s+short test summary info\s+={10,}", output, re.DOTALL)
+        if failures_match:
+            failures_section = failures_match.group(1).strip()
+            # 按每个失败用例的下划线分隔符分割
+            failed_cases = re.split(r"_{5,}", failures_section)
+            for case in failed_cases:
+                if case.strip():
+                    summary['failed_cases_details'].append(case.strip())
         
     return summary
 
@@ -268,7 +278,12 @@ def test_add_failure_example():
 """
     
     # 调用入口函数
-    report = execute_tests_and_get_report(sample_logic_code, sample_test_code)
+    report = execute_tests_and_get_report(
+        sample_logic_code,
+        sample_test_code,
+        logic_filename=LOGIC_FILENAME,
+        test_filename=TEST_FILENAME
+    )
     
     print("\n" + "="*70)
     print("                 FINAL STRUCTURED REPORT (JSON FORMAT)                ")
