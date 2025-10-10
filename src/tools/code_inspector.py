@@ -152,7 +152,7 @@ class CodeAnalyzer:
             # 圈复杂度 (Cyclomatic Complexity)
             cmd_cc = f"radon cc \"{self.filepath}\" -j"
             # 修正：明确 encoding='utf-8'，以防 radon 输出的 JSON 中包含中文
-            result_cc = subprocess.run(cmd_cc, capture_output=True, text=True, encoding='utf-8', shell=True)
+            result_cc = subprocess.run(cmd_cc, capture_output=True, text=True, encoding='gbk', shell=True)
             
             # 检查是否有错误或非JSON输出
             if result_cc.stderr or not result_cc.stdout.strip():

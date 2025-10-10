@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 # ------------------------- 导入自定义工具 -------------------------
 from ..tools.code_inspector import CodeAnalyzer
 from ..tools.code_executer import execute_tests_and_get_report
+from ..tools.requirement_analyzer import RequirementAnalyzer
 
 # ------------------------- 导入配置 -------------------------
 def load_config():
@@ -59,6 +60,7 @@ class WorkflowState(TypedDict):
     code: str                  # 待测试的源代码
     requirement: str           # 用户的测试需求
     analysis_report: str       # 代码静态分析报告 (JSON 字符串)
+    structured_requirement: str    # 结构化需求报告 (JSON 字符串)
     generation_prompt: str     # 用于生成测试用例的最终 Prompt
     test_code: str             # 生成的测试用例代码
     
@@ -119,51 +121,75 @@ class TestGenerationWorkflow:
             # 如果分析失败，将错误信息放入报告中，以便后续节点处理
             return {"analysis_report": json.dumps({"error": error_msg})}
 
+    def requirement_analyzer_node(self, state: WorkflowState) -> dict:
+        """
+        节点2: 需求分析
+        使用 RequirementAnalyzer 对用户需求进行结构化分析。
+        """
+        print("--- Step 2: Analyzing Requirement ---")
+        try:
+            analyzer = RequirementAnalyzer()
+            # 将需求和代码都传递给分析器以获得更好的上下文
+            analysis_result = analyzer.analyze(state["requirement"], state["code"])
+            report_str = json.dumps(analysis_result, indent=2, ensure_ascii=False)
+            return {"structured_requirement": report_str}
+        except Exception as e:
+            error_msg = f"Requirement analysis failed: {e}"
+            print(f"ERROR: {error_msg}")
+            return {"structured_requirement": json.dumps({"error": error_msg})}
+
     def prompt_organizer_node(self, state: WorkflowState) -> dict:
         """
-        节点2: Prompt 组织
+        节点3: Prompt 组织
         整合用户需求和代码分析报告，构建一个高质量的 Prompt。
         """
-        print("--- Step 2: Organizing Prompt ---")
+        print("--- Step 3: Organizing Prompt ---")
         
         # 获取 code_executer.py 中定义的源文件名
         # 理论上这个也应该来自配置文件，但为了快速修复，我们先在这里直接使用
         source_module_name = "logic_module"
 
         prompt_template = f"""
-        **Goal:** Generate a comprehensive pytest test suite.
+        **目标:** 生成一个全面的 pytest 测试套件。
 
-        **Source Code Module Name:** `{source_module_name}`
+        **源代码模块名:** `{source_module_name}`
 
-        **User's Requirement:**
+        **用户原始需求:**
         {state['requirement']}
 
-        **Source Code to Test:**
+        **结构化需求分析 (您设计测试用例的主要指南):**
+        这个结构化分析将用户的请求分解为具体的、可操作的测试场景。
+        ```json
+        {state['structured_requirement']}
+        ```
+
+        **待测试源代码:**
         ```python
         {state['code']}
         ```
 
-        **Static Code Analysis Report:**
-        This report provides deep insights into the code's structure, complexity, and potential issues. Use it to guide your test case design.
+        **静态代码分析报告:**
+        这份报告提供了对代码结构、复杂性和潜在问题的深入洞察。用它来进一步完善您的测试用例。
         ```json
         {state['analysis_report']}
         ```
 
-        **Task:**
-        Based on all the information above, write a pytest test suite.
-        - **Crucially, you MUST import the functions to be tested from the `{source_module_name}` module.** For example: `from {source_module_name} import your_function_name`.
-        - The test code must be complete and runnable.
-        - ONLY output the Python code for the test suite inside markdown fences (```python ... ```). Do not include any other text or explanation.
+        **任务:**
+        基于以上所有信息，，编写一个 pytest 测试套件。
+        - **至关重要，您必须从 `{source_module_name}` 模块导入待测试的函数。** 例如: `from {source_module_name} import your_function_name`。
+        - 测试代码必须是完整且可运行的。
+        - 确保您生成的测试覆盖了结构化分析中概述的所有场景。
+        - **只在 markdown 的代码块 (```python ... ```) 中输出测试套件的 Python 代码。** 不要包含任何其他文本或解释。
         """
         return {"generation_prompt": prompt_template}
     
     def test_generator_node(self, state: WorkflowState) -> dict:
         """
-        节点3: 测试用例生成
+        节点4: 测试用例生成
         调用 LLM，根据 Prompt 生成测试代码。
         如果存在上一轮的反馈，会一并考虑。
         """
-        print("--- Step 3: Generating Test Cases ---")
+        print("--- Step 4: Generating Test Cases ---")
         
         prompt = state["generation_prompt"]
         if state.get("evaluation_feedback"):
@@ -199,10 +225,10 @@ class TestGenerationWorkflow:
 
     def test_executor_node(self, state: WorkflowState) -> dict:
         """
-        节点4: 测试执行与评估
+        节点5: 测试执行与评估
         使用 CodeExecutor 真实地运行测试并获取覆盖率等指标。
         """
-        print("--- Step 4: Executing Tests and Gathering Metrics ---")
+        print("--- Step 5: Executing Tests and Gathering Metrics ---")
         logic_code = state["code"]
         test_code = state["test_code"]
 
@@ -231,10 +257,10 @@ class TestGenerationWorkflow:
 
     def result_evaluator_node(self, state: WorkflowState) -> dict:
         """
-        节点5: 结果评估 
+        节点6: 结果评估 
         优先使用客观指标进行判断，只有在不达标时才让 LLM 生成反馈。
         """
-        print("--- Step 5: Evaluating Results ---")
+        print("--- Step 6: Evaluating Results ---")
         current_retries = state.get('retry_count', 0)
         
         # 核心修改：将客观判断放在首位
@@ -308,6 +334,7 @@ class TestGenerationWorkflow:
 
         # 注册所有节点
         graph.add_node("code_analyzer", self.code_analyzer_node)
+        graph.add_node("requirement_analyzer", self.requirement_analyzer_node)
         graph.add_node("prompt_organizer", self.prompt_organizer_node)
         graph.add_node("test_generator", self.test_generator_node)
         graph.add_node("test_executor", self.test_executor_node)
@@ -315,7 +342,8 @@ class TestGenerationWorkflow:
 
         # 定义工作流的执行路径
         graph.set_entry_point("code_analyzer")
-        graph.add_edge("code_analyzer", "prompt_organizer")
+        graph.add_edge("code_analyzer", "requirement_analyzer") 
+        graph.add_edge("requirement_analyzer", "prompt_organizer")
         graph.add_edge("prompt_organizer", "test_generator")
         graph.add_edge("test_generator", "test_executor")
         graph.add_edge("test_executor", "result_evaluator")
