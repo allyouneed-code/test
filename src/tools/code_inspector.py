@@ -152,7 +152,7 @@ class CodeAnalyzer:
             # 圈复杂度 (Cyclomatic Complexity)
             cmd_cc = f"radon cc \"{self.filepath}\" -j"
             # 修正：明确 encoding='utf-8'，以防 radon 输出的 JSON 中包含中文
-            result_cc = subprocess.run(cmd_cc, capture_output=True, text=True, encoding='gbk', shell=True)
+            result_cc = subprocess.run(cmd_cc, capture_output=True, text=True, shell=True, errors="ignore")
             
             # 检查是否有错误或非JSON输出
             if result_cc.stderr or not result_cc.stdout.strip():
@@ -164,7 +164,7 @@ class CodeAnalyzer:
             
             # 代码行数 (Lines of Code)
             cmd_raw = f"radon raw \"{self.filepath}\" -j"
-            result_raw = subprocess.run(cmd_raw, capture_output=True, text=True, encoding='utf-8', shell=True)
+            result_raw = subprocess.run(cmd_raw, capture_output=True, text=True, shell=True, errors="ignore")
             raw_data = json.loads(result_raw.stdout).get(self.filepath, {})
 
             return {
@@ -175,6 +175,8 @@ class CodeAnalyzer:
                     "comment_lines": raw_data.get('comments', 'N/A'),
                 }
             }
+        except FileNotFoundError:
+            raise RuntimeError("`radon` is not installed or not found in PATH. Please install it via `pip install radon`.")
         except json.JSONDecodeError as e:
             return {"error": f"Radon JSON 解析失败 (stdout: {result_cc.stdout[:50]}...): {str(e)}"}
         except Exception as e:
@@ -202,7 +204,7 @@ class CodeAnalyzer:
         try:
             cmd = f"bandit -r \"{self.filepath}\" -f json --quiet" # 添加 --quiet 减少非 JSON 输出
             # 修正：明确 encoding='utf-8'
-            result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', shell=True)
+            result = subprocess.run(cmd, capture_output=True, text=True, shell=True, errors="ignore")
             
             # 检查 stderr，bandit 错误信息通常在 stderr
             if result.stderr:
@@ -216,6 +218,8 @@ class CodeAnalyzer:
             
             bandit_results = json.loads(stdout_str)
             return bandit_results.get("results", [])
+        except FileNotFoundError:
+            raise RuntimeError("`bandit` is not installed or not found in PATH. Please install it via `pip install bandit`.")
         except json.JSONDecodeError as e:
             # 捕获 JSON 解析失败，这正是原问题中 'Expect value' 错误的来源
             return [{"error": f"Bandit JSON 解析失败 (stdout: {result.stdout[:50]}...): {str(e)}"}]
@@ -231,7 +235,7 @@ class CodeAnalyzer:
             # 使用 JSON 输出格式
             cmd = f"pylint \"{self.filepath}\" --output-format=json"
             # 修正：明确 encoding='utf-8'
-            result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', shell=True)
+            result = subprocess.run(cmd, capture_output=True, text=True, shell=True, errors="ignore")
             
             if result.stderr:
                  # Pylint 错误或警告信息通常在 stdout，stderr 可能是致命错误
@@ -245,6 +249,8 @@ class CodeAnalyzer:
             # Pylint 在解析失败时，stdout 可能不是有效的 JSON
             pylint_results = json.loads(stdout_str)
             return pylint_results
+        except FileNotFoundError:
+            raise RuntimeError("`pylint` is not installed or not found in PATH. Please install it via `pip install pylint`.")
         except json.JSONDecodeError as e:
             return [{"error": f"Pylint JSON 解析失败 (stdout: {result.stdout[:50]}...): {str(e)}"}]
         except Exception as e:

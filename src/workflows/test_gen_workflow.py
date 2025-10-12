@@ -98,7 +98,10 @@ class TestGenerationWorkflow:
     """
     def __init__(self, config: dict):
         self.llm = init_chat_model("openai:gpt-3.5-turbo-1106", temperature=0.2)
-        self.structured_evaluator = self.llm.with_structured_output(TestEvaluation)
+        self.structured_evaluator = self.llm.with_structured_output(
+            TestEvaluation,
+            method="function_calling"
+        )
         # 从传入的配置字典中获取参数
         self.coverage_threshold = config["coverage_threshold"]
         self.max_retries = config["max_retries"]
@@ -113,16 +116,10 @@ class TestGenerationWorkflow:
         使用 CodeAnalyzer 对源代码进行深度静态分析。
         """
         print("--- Step 1: Analyzing Source Code ---")
-        try:
-            analyzer = CodeAnalyzer(state["code"])
-            analysis_result = analyzer.analyze()
-            report_str = json.dumps(analysis_result, indent=2, ensure_ascii=False)
-            return {"analysis_report": report_str}
-        except Exception as e:
-            error_msg = f"Code analysis failed: {e}"
-            print(f"ERROR: {error_msg}")
-            # 如果分析失败，将错误信息放入报告中，以便后续节点处理
-            return {"analysis_report": json.dumps({"error": error_msg})}
+        analyzer = CodeAnalyzer(state["code"])
+        analysis_result = analyzer.analyze()
+        report_str = json.dumps(analysis_result, indent=2, ensure_ascii=False)
+        return {"analysis_report": report_str}
 
     def requirement_analyzer_node(self, state: WorkflowState) -> dict:
         """
@@ -131,14 +128,26 @@ class TestGenerationWorkflow:
         """
         print("--- Step 2: Analyzing Requirement ---")
         try:
-            analyzer = RequirementAnalyzer()
-            # 将需求和代码都传递给分析器以获得更好的上下文
-            analysis_result = analyzer.analyze(state["requirement"], state["code"])
-            report_str = json.dumps(analysis_result, indent=2, ensure_ascii=False)
-            return {"structured_requirement": report_str}
+            # 使用 get_openai_callback 上下文管理器来追踪 Token
+            with get_openai_callback() as cb:
+                analyzer = RequirementAnalyzer()
+                # 将需求和代码都传递给分析器以获得更好的上下文
+                analysis_result = analyzer.analyze(state["requirement"], state["code"])
+                report_str = json.dumps(analysis_result, indent=2, ensure_ascii=False)           
+                print(f"  -> LLM Call Tokens (Requirement Analysis): {cb.total_tokens} (Prompt: {cb.prompt_tokens}, Completion: {cb.completion_tokens})")
+
+            # 将捕获到的 Token 累加到总数中
+            return {
+                "structured_requirement": report_str,
+                "total_prompt_tokens": state["total_prompt_tokens"] + cb.prompt_tokens,
+                "total_completion_tokens": state["total_completion_tokens"] + cb.completion_tokens,
+                "total_tokens": state["total_tokens"] + cb.total_tokens,
+            }
+            
         except Exception as e:
             error_msg = f"Requirement analysis failed: {e}"
             print(f"ERROR: {error_msg}")
+            # 即使失败，也返回错误信息以便调试，但不增加Token
             return {"structured_requirement": json.dumps({"error": error_msg})}
 
     def prompt_organizer_node(self, state: WorkflowState) -> dict:
@@ -237,9 +246,8 @@ class TestGenerationWorkflow:
         )
 
         execution_feedback_parts = []
-        if "error" in report:
-            coverage, pass_rate = 0.0, 0.0
-            execution_feedback_parts.append(f"Test execution failed: {report['error']}")
+        if "error" in report and "Test execution failed" in report["error"]:
+            raise RuntimeError(f"Test execution failed critically: {report['error']}")
         else:
             test_exec = report.get('test_execution', {})
             cov_metrics = report.get('coverage_metrics', {})

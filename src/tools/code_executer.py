@@ -211,9 +211,10 @@ def execute_tests_and_get_report(logic_code: str, test_code: str, logic_filename
     
     try:
         # --- 1. 写入文件 ---
-        if not _write_code_to_file(logic_code, logic_filename): return {'error': f"Failed to write logic code to {logic_filename}"}
-        if not _write_code_to_file(test_code, test_filename): return {'error': f"Failed to write test code to {TEST_FILENAME}"}
-
+        if not _write_code_to_file(logic_code, logic_filename):
+            raise RuntimeError(f"Failed to write logic code to {logic_filename}")
+        if not _write_code_to_file(test_code, test_filename):
+            raise RuntimeError(f"Failed to write test code to {test_filename}")
         # --- 2. 执行测试 ---
         pytest_result = _run_pytest_with_coverage(test_filename)
         
@@ -225,14 +226,15 @@ def execute_tests_and_get_report(logic_code: str, test_code: str, logic_filename
         subprocess.run(["coverage", "html"], check=True, capture_output=True)
         print("\n[Executor] HTML report generated in 'htmlcov/' directory.")
         
+        if 'error' in final_report['coverage_metrics']:
+            final_report['error'] = final_report['coverage_metrics']['error']
+
         return final_report
         
     except FileNotFoundError as e:
-        final_report['error'] = f"Required tool not found. Please ensure 'pytest', 'coverage', and 'python' are installed and in PATH. Error: {e}"
-        return final_report
+        raise RuntimeError("A required tool was not found. Please ensure 'pytest' and 'coverage' are installed and accessible in your system's PATH.")
     except Exception as e:
-        final_report['error'] = f"An unexpected error occurred during execution: {e}"
-        return final_report
+        raise RuntimeError(f"A subprocess command failed during test execution: {e.stderr}")
     finally:
         # --- 5. 清理 ---
         _cleanup(files_to_clean)
