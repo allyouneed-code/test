@@ -23,7 +23,7 @@ def load_config():
     config = {
         "max_retries": 3,
         "coverage_threshold": 0.8,
-        "mutation_threshold": 0.8,
+        "mutation_threshold": 0.9,
         "logic_filename": "logic_module.py",
         "test_filename": "test_script.py"
     }
@@ -208,9 +208,38 @@ class TestGenerationWorkflow:
         """
         print("--- Step 4: Generating Test Cases ---")
         
-        prompt = state["generation_prompt"]
-        if state.get("evaluation_feedback"):
+        # 检查是否存在反馈。如果存在，说明是迭代优化阶段。
+        if feedback := state.get("evaluation_feedback"):
             print("  -> Incorporating feedback from previous run.")
+            # 创建一个专注于“修复”的、全新的Prompt
+            prompt = f"""
+            **任务: 修复并改进现有的测试用例**
+
+            你是一名资深的测试工程师。上一轮生成的测试用例不够健壮，未能通过质量检测。
+            请根据下面提供的“改进建议”，对“上一轮的测试代码”进行修改，以解决所有已知问题。
+
+            **上一轮的测试代码:**
+            ```python
+            {state['test_code']}
+            ```
+
+            **改进建议/上一轮运行结果的问题:**
+            ---
+            {feedback}
+            ---
+
+            **待测试源代码 (供参考):**
+            ```python
+            {state['code']}
+            ```
+
+            **输出要求:**
+            - **只在 markdown 的代码块 (```python ... ```) 中输出修复后的、完整的 Python 测试代码。**
+            - 不要包含任何额外的解释或评论。
+            - 确保新的测试用例能够覆盖改进建议中提到的所有盲点。
+            """
+        else:
+            # 如果没有反馈，说明是第一次生成，使用原始的、最详细的Prompt
             prompt = state["generation_prompt"]
 
         
@@ -293,35 +322,19 @@ class TestGenerationWorkflow:
         
         # 核心修改：将客观判断放在首位
         if state["pass_rate"] >= 1.0 and state["coverage"] >= self.coverage_threshold:
-            # 如果客观指标达标，直接通过，不再询问 LLM
             print("  -> Objective metrics met. Test suite accepted.")
-            grade = TestEvaluation(
-                grade="pass",
-                feedback="The test suite meets all quality standards."
-            )
-            cb = None # 无需调用LLM，cb为空
+            grade = "pass"
+            feedback = "The test suite meets all quality standards."
         else:
-            # 如果客观指标不达标，才让 LLM 生成改进建议
-            print("  -> Objective metrics not met. Generating feedback for improvement.")
-            eval_prompt = f"""
-            The generated test suite is not satisfactory based on the following results:
-            - Pass Rate: {state['pass_rate']:.2%} (must be 100%)
-            - Coverage Rate: {state['coverage']:.2%} (must be >= {self.coverage_threshold:.0%})
-            - Execution Feedback: {state['execution_feedback']}
-
-            Please provide clear, actionable feedback on how to fix the tests to meet the requirements.
-            """
-
-            with get_openai_callback() as cb:
-                llm_feedback = self.llm.invoke(eval_prompt).content
-                formatted_feedback = f"**1. 关于基础质量指标的反馈 (覆盖率/通过率):\n** {llm_feedback}"
-                grade = TestEvaluation(grade="not pass", feedback=formatted_feedback)
-            print(f"  -> LLM Call Tokens: {cb.total_tokens} (Prompt: {cb.prompt_tokens}, Completion: {cb.completion_tokens})")
+            print("  -> Objective metrics not met. Using raw execution feedback for the next run.")
+            grade = "not pass"
+            # 直接将执行器节点的原始输出作为反馈
+            feedback = state['execution_feedback']
 
         # --- 打印迭代总结 ---
         print("\n" + "="*20 + f" Iteration #{current_retries + 1} Summary " + "="*20)
-        if grade.grade == "not pass":
-            print(f"  - AI Feedback for Next Round: {grade.feedback}")
+        if grade == "not pass":
+            print(f"  - Feedback for Next Round:\n{feedback}")
         print("="*61)
 
         history = state.get("iteration_history", [])
@@ -330,23 +343,18 @@ class TestGenerationWorkflow:
             "test_code": state["test_code"],
             "pass_rate": state["pass_rate"],
             "coverage": state["coverage"],
-            "feedback": grade.feedback
+            "feedback": feedback
         })
 
-        print(f"  -> Evaluation Grade: {grade.grade}")
-        # 准备返回的数据，如果有LLM调用，则累加Token
+        print(f"  -> Evaluation Grade: {grade}")
+
         return_data = {
-            "evaluation_result": grade.grade,
-            "evaluation_feedback": grade.feedback,
+            "evaluation_result": grade,
+            "evaluation_feedback": feedback,
             "retry_count": current_retries + 1,
             "iteration_history": history
         }
-        if cb:
-            return_data.update({
-                "total_prompt_tokens": state["total_prompt_tokens"] + cb.prompt_tokens,
-                "total_completion_tokens": state["total_completion_tokens"] + cb.completion_tokens,
-                "total_tokens": state["total_tokens"] + cb.total_tokens,
-            })
+
         return return_data
     
         # --- 节点 7: 变异测试检测 ---
@@ -568,7 +576,6 @@ def calculate(a, b, operation):
         return a + b
     if operation == 'subtract':
         return a - b
-    # 故意留下未被良好测试的分支
     if operation == 'multiply':
         return a * b
     if operation == 'divide':

@@ -60,7 +60,8 @@ def _parse_pytest_summary(output):
         'passed': 0,
         'failed': 0,
         'skipped': 0,
-        'pass_rate': 0.0
+        'pass_rate': 0.0,
+        'failed_cases_details': []
     }
     
     # 查找包含 "passed", "failed"... 的行
@@ -102,11 +103,11 @@ def _get_coverage_metrics(logic_filename):
     # 匹配文件名, Stmts, Miss, Cover, Missing 行号
     # 例如： logic_module.py    7      1    86%   8
     REPORT_PATTERN = re.compile(
-        r"^(?P<name>\S+)\s+"  # 文件名 (name)
-        r"(?P<stmts>\d+)\s+"  # 语句数 (stmts)
-        r"(?P<miss>\d+)\s+"   # 缺失数 (miss)
-        r"(?P<cover>\d+)%\s+" # 覆盖率 (cover)
-        r"(?P<missing_lines>.*)$"  # 缺失行号 (missing_lines)
+        r"^(?P<name>\S+)\s+"         # 文件名 (name)
+        r"(?P<stmts>\d+)\s+"        # 语句数 (stmts)
+        r"(?P<miss>\d+)\s+"          # 缺失数 (miss)
+        r"(?P<cover>\d+)%\s*"        # 覆盖率 (cover) 和可选的空格
+        r"(?P<missing_lines>.*)?$"   # 缺失行号 (missing_lines)，整个组是可选的
     )
 
     try:
@@ -234,7 +235,7 @@ def execute_tests_and_get_report(logic_code: str, test_code: str, logic_filename
     except FileNotFoundError as e:
         raise RuntimeError("A required tool was not found. Please ensure 'pytest' and 'coverage' are installed and accessible in your system's PATH.")
     except Exception as e:
-        raise RuntimeError(f"A subprocess command failed during test execution: {e.stderr}")
+        raise RuntimeError(f"An unexpected error occurred during test execution: {e}")
     finally:
         # --- 5. 清理 ---
         _cleanup(files_to_clean)

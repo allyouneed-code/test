@@ -27,13 +27,11 @@ def parse_survived_mutants(output: str) -> List[Dict[str, str]]:
         if not block.strip():
             continue
 
-        # 3. 只处理那些明确标记为 "survived" 的块
-        # 使用更严格的匹配，确保'survived'是该块的最后状态
+        # 3. 处理那些明确标记为 "survived" 的块
         if re.search(r'\[.*?s\]\s+survived\s*$', block, re.DOTALL):
-            # 4. 在这个小块内进行精确匹配，避免跨块干扰
             id_match = re.search(r'^\s*(\d+)\].*?', block)
-            original_match = re.search(r'-\s*(\d+):\s*(.*)', block)
-            mutated_match = re.search(r'\+\s*(\d+):\s*(.*)', block)
+            original_match = re.search(r'^\s*-\s*(\d+):\s*(.*)', block, re.MULTILINE)
+            mutated_match = re.search(r'^\s*\+\s*(\d+):\s*(.*)', block, re.MULTILINE)
 
             if id_match and original_match and mutated_match:
                 survived_mutants.append({
@@ -92,7 +90,7 @@ def run_mutation_test(source_code: str, test_code: str, logic_filename: str, tes
         if os.path.exists(base_dir): shutil.rmtree(base_dir)
 
 # ==================================================================
-#                       可以直接运行的调试示例
+#                       example usage
 # ==================================================================
 if __name__ == "__main__":
     
@@ -148,22 +146,4 @@ if __name__ == "__main__":
         test_filename="test_script.py"
     )
 
-    # 4. 打印并分析结果
-    print("\n" + "-"*20 + " 弱测试用例分析 " + "-"*20)
-    if "error" in result_weak:
-        print(f"测试执行失败: {result_weak['error']}")
-    else:
-        score = result_weak['mutation_score']
-        print(f"最终变异得分: {score:.2%}")
-        if result_weak['survived_count'] > 0:
-            print(f"\n分析: 测试不够健壮！有 {result_weak['survived_count']} 个变异体存活了下来。")
-            print("这意味着AI生成的测试用例存在以下盲点：\n")
-            for i, mutant in enumerate(result_weak['survived_details'], 1):
-                print(f"  盲点 {i}:")
-                print(f"    - 当第 {mutant['original_line_no']} 行的 `{mutant['original_code']}`")
-                print(f"    - 被错误地改成 `{mutant['mutated_code']}` 时,")
-                print(f"    - 测试用例未能发现这个bug。\n")
-        else:
-            print("分析: 所有变异体都被杀死了，测试用例健壮！")
-
-    print("-" * 52)
+    #
