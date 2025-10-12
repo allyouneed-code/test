@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 from ..tools.code_inspector import CodeAnalyzer
 from ..tools.code_executer import execute_tests_and_get_report
 from ..tools.requirement_analyzer import RequirementAnalyzer
+from ..tools.mutation_tester import run_mutation_test
 
 # ------------------------- 导入配置 -------------------------
 def load_config():
@@ -22,6 +23,7 @@ def load_config():
     config = {
         "max_retries": 3,
         "coverage_threshold": 0.8,
+        "mutation_threshold": 0.8,
         "logic_filename": "logic_module.py",
         "test_filename": "test_script.py"
     }
@@ -73,12 +75,18 @@ class WorkflowState(TypedDict):
     retry_count: int           # 重试次数
     iteration_history: List[IterationLog] # 迭代日志
     
-    # 新增：成本与效率指标
+    # 成本与效率指标
     start_time: float               # 工作流开始时间戳
     total_execution_time: float     # 总执行时间
     total_prompt_tokens: int        # 累计 Prompt Token 消耗
     total_completion_tokens: int    # 累计 Completion Token 消耗
     total_tokens: int               # 累计总 Token 消耗
+
+    # 标记和记录变异测试工具错误
+    mutation_test_has_error: bool
+    mutation_error_details: str
+    mutation_details: str
+    mutation_score: float           # 变异测试得分
 
 class TestEvaluation(BaseModel):
     """用于评估器结构化输出的 Schema"""
@@ -107,6 +115,7 @@ class TestGenerationWorkflow:
         self.max_retries = config["max_retries"]
         self.logic_filename = config["logic_filename"]
         self.test_filename = config["test_filename"]
+        self.mutation_threshold = config["mutation_threshold"]
 
     # ------------------------- 流程中的节点 (Nodes) -------------------------
 
@@ -156,11 +165,11 @@ class TestGenerationWorkflow:
         整合用户需求和代码分析报告，构建一个高质量的 Prompt。
         """
         print("--- Step 3: Organizing Prompt ---")
-
+        module_name = os.path.splitext(self.logic_filename)[0]
         prompt_template = f"""
         **目标:** 生成一个全面的 pytest 测试套件。
 
-        **源代码模块名:** `{self.logic_filename}`
+        **源代码模块名:** `{module_name}`
 
         **用户原始需求:**
         {state['requirement']}
@@ -184,7 +193,7 @@ class TestGenerationWorkflow:
 
         **任务:**
         基于以上所有信息，，编写一个 pytest 测试套件。
-        - **至关重要，您必须从 `{self.logic_filename}` 模块导入待测试的函数。** 例如: `from {self.logic_filename} import your_function_name`。
+        - **至关重要，您必须从 `{module_name}` 模块导入待测试的函数。** 例如: `from {module_name} import your_function_name`。
         - 测试代码必须是完整且可运行的。
         - 确保您生成的测试覆盖了结构化分析中概述的所有场景。
         - **只在 markdown 的代码块 (```python ... ```) 中输出测试套件的 Python 代码。** 不要包含任何其他文本或解释。
@@ -202,7 +211,8 @@ class TestGenerationWorkflow:
         prompt = state["generation_prompt"]
         if state.get("evaluation_feedback"):
             print("  -> Incorporating feedback from previous run.")
-            prompt += f"\n**Feedback from previous attempt (Please address these issues):**\n{state['evaluation_feedback']}"
+            prompt = state["generation_prompt"]
+
         
         # 使用 get_openai_callback 上下文管理器来追踪 Token
         with get_openai_callback() as cb:
@@ -303,8 +313,9 @@ class TestGenerationWorkflow:
             """
 
             with get_openai_callback() as cb:
-                feedback_response = self.llm.invoke(eval_prompt)
-                grade = TestEvaluation(grade="not pass", feedback=feedback_response.content)
+                llm_feedback = self.llm.invoke(eval_prompt).content
+                formatted_feedback = f"**1. 关于基础质量指标的反馈 (覆盖率/通过率):\n** {llm_feedback}"
+                grade = TestEvaluation(grade="not pass", feedback=formatted_feedback)
             print(f"  -> LLM Call Tokens: {cb.total_tokens} (Prompt: {cb.prompt_tokens}, Completion: {cb.completion_tokens})")
 
         # --- 打印迭代总结 ---
@@ -337,25 +348,109 @@ class TestGenerationWorkflow:
                 "total_tokens": state["total_tokens"] + cb.total_tokens,
             })
         return return_data
-
-    # ------------------------- 流程中的逻辑 (Edges) -------------------------
-
-    def route_decision(self, state: WorkflowState) -> Literal["continue", "end"]:
+    
+        # --- 节点 7: 变异测试检测 ---
+    def mutation_test_node(self, state: WorkflowState) -> dict:
         """
-        条件分支: 根据评估结果决定是结束还是重新生成。
+        执行变异测试，并能区分工具失败和得分低两种情况。
         """
-        print("--- Step 6: Making Decision ---")
-        if state["evaluation_result"] == "pass":
-            print("  -> Decision: Test suite accepted. Workflow ends.")
-            return "end"
+        print("--- Step 7: Deep Quality Check (Mutation Testing) ---")
+        result = run_mutation_test(
+            source_code=state["code"],
+            test_code=state["test_code"],
+            logic_filename=self.logic_filename,
+            test_filename=self.test_filename
+        )
         
-        # 如果测试未通过，检查重试次数
+        if details := result.get("survived_details"):
+            print("\n" + "-"*20 + " Mutation Test Details " + "-"*20)
+            # 打印 mutpy 的核心输出部分
+            if "[*] Start mutants generation and execution:" in details:
+                print(details.split("[*] Start mutants generation and execution:")[1].strip())
+            else:
+                print(details) # 如果格式有变，则打印全部
+            print("-" * 67 + "\n")
+
+        if "error" in result and result["error"]:
+            print(f"  -> CRITICAL ERROR: Mutation testing tool failed: {result['error']}")
+            # 如果变异测试工具本身失败，设置错误标记并记录详情
+            return {
+                "mutation_test_has_error": True,
+                "mutation_error_details": result['error'],
+                "mutation_details": result.get("details", "No details available.")
+            }
+        
+        score = result.get("mutation_score", 0.0)
+        if score == 0.0: 
+            print("  -> WARNING: Mutation testing tool returned a score of 0, indicating a possible failure.")
+            return {
+                "mutation_test_has_error": True,
+                "mutation_error_details": "Mutation testing tool returned a score of 0, indicating a possible failure."
+            }
+        if score < self.mutation_threshold:
+            print(f"  -> QA Failed. Mutation score ({score:.2%}) is too low.")
+            feedback_intro = (
+                f"**关于测试强度的反馈 (来自变异测试):\n** "
+                f"测试用例的健壮性不足。它的变异测试得分仅为 {score:.2%}，低于 {self.mutation_threshold:.2%} 的标准。\n"
+                f"**具体弱点:** 您的测试未能发现以下 {result.get('survived_count', 0)} 个潜在的bug：\n\n"
+            )
+            
+            survived_details = result.get("survived_details", [])
+            feedback_details = ""
+            for i, mutant in enumerate(survived_details, 1):
+                feedback_details += (
+                    f"  **{i}. 在第 {mutant['original_line_no']} 行:**\n"
+                    f"     - 原始代码是: `{mutant['original_code']}`\n"
+                    f"     - 当它被改成: `{mutant['mutated_code']}` 时, 您的测试依然通过了。\n"
+                    f"     - **改进建议:** 请补充一个能区分这两种情况的测试用例。\n\n"
+                )
+
+            qa_feedback = feedback_intro + feedback_details
+            return {
+                "mutation_score": score,
+                "mutation_test_has_error": False,
+                "evaluation_feedback": qa_feedback,  
+                "evaluation_result": "not pass",   
+                "mutation_details": result.get("details", "No details available.")
+            }
+
+        # 如果工具正常运行，则正常返回分数
+        return {
+            "mutation_score": result.get("mutation_score", 0.0),
+            "mutation_test_has_error": False,
+            "mutation_details": result.get("details", "No details available.")
+        }
+
+    # ------------------------- 决策逻辑 -------------------------
+
+    def route_after_initial_evaluation(self, state: WorkflowState) -> Literal["mutation_test", "retry", "end"]:
+        print("--- Step 6a: Initial Decision ---")
+        if state["evaluation_result"] == "pass":
+            print("  -> Decision: Initial tests passed. Proceeding to Mutation Test.")
+            return "mutation_test"
         if state["retry_count"] >= self.max_retries:
-            print(f"  -> Decision: Maximum retries ({self.max_retries}) reached. Forcing workflow to end.")
-            return "force_end"
+            return "end"
+        return "retry"
+
+    def route_after_mutation_test(self, state: WorkflowState) -> Literal["end", "retry", "critical_error"]:
+        """
+        在变异测试之后做决策，逻辑变得更简单。
+        """
+        print("--- Step 7a: Final Decision ---")
+        if state.get("mutation_test_has_error"):
+            return "critical_error"
+        
+        # 只需检查分数是否达标即可，状态更新已在上一节点完成
+        print(f"  -> Mutation Test Score: {state.get('mutation_score', 0.0):.2%}")
+        if state.get("mutation_score", 0.0) >= self.mutation_threshold:
+            print("  -> Decision: Mutation test passed. Ending workflow.")
+            return "end"
         else:
-            print("  -> Decision: Test suite rejected. Looping back to generator.")
-            return "continue"
+            # 检查是否达到最大重试次数
+            if state["retry_count"] >= self.max_retries:
+                return "end"
+            print("  -> Decision: Mutation test failed. Retrying test generation.")
+            return "retry"
 
     # ------------------------- 构建计算图 -------------------------
 
@@ -372,6 +467,7 @@ class TestGenerationWorkflow:
         graph.add_node("test_generator", self.test_generator_node)
         graph.add_node("test_executor", self.test_executor_node)
         graph.add_node("result_evaluator", self.result_evaluator_node)
+        graph.add_node("mutation_test_node", self.mutation_test_node)
 
         # 定义工作流的执行路径
         graph.set_entry_point("code_analyzer")
@@ -384,11 +480,19 @@ class TestGenerationWorkflow:
         # 添加条件分支
         graph.add_conditional_edges(
             "result_evaluator",
-            self.route_decision,
+            self.route_after_initial_evaluation,
+            {"mutation_test": "mutation_test_node", "retry": "test_generator", "end": END},
+        )
+        
+        # **核心修改**：为变异测试之后的决策添加新的路由
+        graph.add_conditional_edges(
+            "mutation_test_node",
+            self.route_after_mutation_test,
             {
+                "retry": "test_generator", 
                 "end": END,
-                "continue": "test_generator", # 如果失败，回到生成器进行重试
-            },
+                "critical_error": END
+            }
         )
 
         return graph.compile()
@@ -423,6 +527,11 @@ class WorkflowReporter:
         final_result = self.state.get('evaluation_result', 'N/A').upper()
         
         print("\n" + "="*50 + "\n            WORKFLOW COMPLETED - FINAL REPORT\n" + "="*50)
+
+        if self.state.get("mutation_test_has_error"):
+            print("\n[!!!] WORKFLOW HALTED DUE TO A CRITICAL ERROR.")
+            print("  -> The mutation testing tool failed to execute.")
+            print(f"  -> Error Details: {self.state.get('mutation_error_details')}")
         
         if self.state.get('retry_count', 0) >= self.config["max_retries"] and final_result == 'NOT PASS':
             print(f"\n[WARNING] Workflow stopped due to reaching the maximum retry limit ({self.config['max_retries']}).")
@@ -487,6 +596,8 @@ def calculate(a, b, operation):
         "start_time": time.time(), "total_prompt_tokens": 0,
         "total_completion_tokens": 0, "total_tokens": 0,
         "iteration_history": [],
+        "mutation_test_has_error": False, 
+        "mutation_error_details": ""      
     }
     final_state = app.invoke(initial_state)
 
