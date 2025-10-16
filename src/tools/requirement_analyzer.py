@@ -3,8 +3,8 @@ import os
 from typing import List, Dict, Any, Optional
 from langchain.chat_models import init_chat_model
 from pydantic import BaseModel, Field
-import textwrap # 确保导入 textwrap
-
+import textwrap 
+from ..llm.client import get_llm_client
 
 class DemandElements(BaseModel):
     """对需求中涉及的核心要素的分类提取。"""
@@ -39,8 +39,11 @@ class RequirementAnalyzer:
 
     def __init__(self):
         """使用能够进行结构化输出的LLM初始化需求分析器。"""
-        self.llm = init_chat_model("openai:gpt-3.5-turbo-1106", temperature=0.0)
-        self.structured_llm = self.llm.with_structured_output(StructuredRequirement)
+        self.llm = get_llm_client(temperature=0.0) 
+        self.structured_llm = self.llm.with_structured_output(
+            StructuredRequirement,
+            method="function_calling" 
+        )
 
     def analyze(self, requirement: str, code_context: str) -> Dict[str, Any]:
         """
