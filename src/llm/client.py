@@ -8,7 +8,7 @@ from langchain_core.language_models.chat_models import BaseChatModel
 os.environ["OPENAI_API_KEY"] = "sk-OjjN3nmNeSZxEE8c2QJz985fdY3b9XegsKi7lTcl8z6Sr2de"
 os.environ["OPENAI_API_BASE"] = "https://api.chatanywhere.tech/v1"
 
-def get_llm_client(model_name: str = "openai:gpt-3.5-turbo-1106", **kwargs) -> BaseChatModel:
+def get_llm_client(model_name: str = "openai:gpt-4o-mini", **kwargs) -> BaseChatModel:
     """
     输入模型名称和参数，返回一个LangChain兼容的LLM客户端实例。
     """

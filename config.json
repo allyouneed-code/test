@@ -6,5 +6,12 @@
   "code_executer_settings": {
     "logic_filename": "logic_module.py",
     "test_filename": "test_script.py"
+  },
+  "c_language_settings": {
+  "compiler": "gcc",
+  "compiler_flags": ["-Wall", "-g"],
+  "test_framework": "cunit",
+  "logic_filename": "main.c",
+  "test_filename": "test_main.c"
   }
 }

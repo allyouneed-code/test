@@ -13,7 +13,6 @@ def _write_code_to_file(content, filename):
     """将代码字符串写入指定文件，确保使用 UTF-8 编码。"""
     try:
         with open(filename, 'w', encoding='utf-8') as file:
-            # 添加编码声明
             if not content.strip().startswith('# -*- coding: utf-8 -*-'):
                 file.write("# -*- coding: utf-8 -*-\n")
             file.write(content)
@@ -31,7 +30,7 @@ def _run_pytest_with_coverage(test_filename: str):
     # --parallel-mode: 确保在子进程中也能正确收集覆盖率
     coverage_command = [
         "coverage", "run", "--parallel-mode", 
-        "--source=.",  # <--- 确保使用 '.' 来追踪当前目录
+        "--source=.",  
         "-m", "pytest", test_filename
     ]
     
@@ -107,7 +106,7 @@ def _get_coverage_metrics(logic_filename):
         r"(?P<stmts>\d+)\s+"        # 语句数 (stmts)
         r"(?P<miss>\d+)\s+"          # 缺失数 (miss)
         r"(?P<cover>\d+)%\s*"        # 覆盖率 (cover) 和可选的空格
-        r"(?P<missing_lines>.*)?$"   # 缺失行号 (missing_lines)，整个组是可选的
+        r"(?P<missing_lines>.*)?$"   # 缺失行号 (missing_lines)
     )
 
     try:
@@ -115,7 +114,6 @@ def _get_coverage_metrics(logic_filename):
         subprocess.run(["coverage", "combine"], check=True, capture_output=True)
 
         # 2. 生成文本报告并捕获输出
-        # -m 选项会输出缺失的行号
         report_result = subprocess.run(
             ["coverage", "report", "-m", logic_filename], 
             capture_output=True, 
@@ -151,7 +149,7 @@ def _get_coverage_metrics(logic_filename):
         match = REPORT_PATTERN.search(target_line)
         
         if not match:
-            # 报告格式不匹配，通常不会发生，除非 coverage.py 版本变化
+            # 报告格式不匹配报错
             raise ValueError(f"Failed to parse report line: {target_line}")
 
         data = match.groupdict()

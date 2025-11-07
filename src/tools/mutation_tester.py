@@ -43,7 +43,7 @@ def parse_survived_mutants(output: str) -> List[Dict[str, str]]:
     return survived_mutants
 
 def run_mutation_test(source_code: str, test_code: str, logic_filename: str, test_filename: str) -> Dict[str, Any]:
-    print("  -> Running Mutation Test using mutpy with pytest runner...")
+    print("  -> 使用mutpy运行变异测试...")
     base_dir = "temp_mutation_test_pytest"
     if os.path.exists(base_dir): shutil.rmtree(base_dir)
     os.makedirs(base_dir, exist_ok=True)

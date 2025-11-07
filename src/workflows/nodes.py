@@ -15,15 +15,15 @@ from ..llm.client import get_llm_client
 
 def code_analyzer_node(state: WorkflowState) -> dict:
     """节点1: 代码分析"""
-    print("--- Step 1: Analyzing Source Code ---")
+    print("--- 步骤1：代码分析 ---")
     analyzer = CodeAnalyzer(state["code"])
-    analysis_result = analyzer.analyze()
-    report_str = json.dumps(analysis_result, indent=2, ensure_ascii=False)
+    final_model = analyzer.process()
+    report_str = json.dumps(final_model, indent=2, ensure_ascii=False)
     return {"analysis_report": report_str}
 
 def requirement_analyzer_node(state: WorkflowState) -> dict:
     """节点2: 需求分析"""
-    print("--- Step 2: Analyzing Requirement ---")
+    print("--- 步骤2：需求分析 ---")
     try:
         with get_openai_callback() as cb:
             analyzer = RequirementAnalyzer()
@@ -47,7 +47,7 @@ def prompt_organizer_node(state: WorkflowState, logic_filename: str) -> dict:
     节点3: Prompt 组织
     整合用户需求和代码分析报告，构建一个高质量的 Prompt。
     """
-    print("--- Step 3: Organizing Prompt ---")
+    print("--- 步骤3：prompt组织 ---")
     module_name = os.path.splitext(logic_filename)[0]
     prompt_template = f"""
     **目标:** 生成一个全面的 pytest 测试套件。
@@ -89,12 +89,11 @@ def test_generator_node(state: WorkflowState) -> dict:
     调用 LLM，根据 Prompt 生成测试代码。
     如果存在上一轮的反馈，会一并考虑。
     """
-    print("--- Step 4: Generating Test Cases ---")
+    print("--- 步骤4：生成用例 ---")
     llm = get_llm_client(temperature=0.2)
     # 检查是否存在反馈。如果存在，说明是迭代优化阶段。
     if feedback := state.get("evaluation_feedback"):
-        print("  -> Incorporating feedback from previous run.")
-        # 创建一个专注于“修复”的、全新的Prompt
+        print("  -> 检测到反馈，进行测试用例修复和改进...")
         prompt = f"""
         **任务: 修复并改进现有的测试用例**
 
@@ -159,7 +158,7 @@ def test_executor_node(state: WorkflowState, logic_filename: str, test_filename:
     节点5: 测试执行与评估
     使用 CodeExecutor 真实地运行测试并获取覆盖率等指标。
     """
-    print("--- Step 5: Executing Tests and Gathering Metrics ---")
+    print("--- 步骤5：执行测试 ---")
 
     report = execute_tests_and_get_report(
         state["code"],
@@ -201,10 +200,9 @@ def result_evaluator_node(state: WorkflowState, coverage_threshold: float) -> di
     节点6: 结果评估 
     优先使用客观指标进行判断，只有在不达标时才让 LLM 生成反馈。
     """
-    print("--- Step 6: Evaluating Results ---")
+    print("--- 步骤6：评估结果 ---")
     current_retries = state.get('retry_count', 0)
     
-    # 核心修改：将客观判断放在首位
     if state["pass_rate"] >= 1.0 and state["coverage"] >= coverage_threshold:
         print("  -> Objective metrics met. Test suite accepted.")
         grade = "pass"
@@ -212,7 +210,6 @@ def result_evaluator_node(state: WorkflowState, coverage_threshold: float) -> di
     else:
         print("  -> Objective metrics not met. Using raw execution feedback for the next run.")
         grade = "not pass"
-        # 直接将执行器节点的原始输出作为反馈
         feedback = state['execution_feedback']
 
     # --- 打印迭代总结 ---
@@ -245,7 +242,7 @@ def mutation_test_node(state: WorkflowState, app_config: dict) -> dict:
     """
     执行变异测试，并能区分工具失败和得分低两种情况。
     """
-    print("--- Step 7: Deep Quality Check (Mutation Testing) ---")
+    print("--- 步骤7：变异测试 ---")
     result = run_mutation_test(
         source_code=state["code"], test_code=state["test_code"],
         logic_filename=app_config["logic_filename"], test_filename=app_config["test_filename"],

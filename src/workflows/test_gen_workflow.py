@@ -22,22 +22,29 @@ class TestGenerationWorkflow:
 
     # --- 决策逻辑 ---
     def route_after_initial_evaluation(self, state: WorkflowState) -> Literal["mutation_test", "retry", "end"]:
-        print("--- Step 6a: Initial Decision ---")
+        print("--- 决策点1 ---")
         if state["evaluation_result"] == "pass":
+            print("测试通过，无需变异测试或重试。")
             return "mutation_test"
         if state["retry_count"] >= self.config["max_retries"]:
+            print("达到最大重试次数，结束流程。")
             return "end"
+        print("测试未通过，准备重试。")
         return "retry"
 
     def route_after_mutation_test(self, state: WorkflowState) -> Literal["end", "retry", "critical_error"]:
-        print("--- Step 7a: Final Decision ---")
+        print("--- 决策点2 ---")
         if state.get("mutation_test_has_error"):
+            print("变异测试过程中出现严重错误，结束流程。")
             return "critical_error"
         if state.get("mutation_score", 0.0) >= self.config["mutation_threshold"]:
+            print("变异测试通过，结束流程。")
             return "end"
         else:
             if state["retry_count"] >= self.config["max_retries"]:
+                print("达到最大重试次数，结束流程。")
                 return "end"
+            print("变异测试未通过，准备重试。")
             return "retry"
 
     # --- 图构建方法 ---
@@ -109,7 +116,7 @@ def calculate(a, b, operation):
 
     #  执行工作流
     print("\n" + "="*50)
-    print("           STARTING TEST GENERATION WORKFLOW           ")
+    print("           开始测试用例生成           ")
     print("="*50 + "\n")
     
     initial_state = {
