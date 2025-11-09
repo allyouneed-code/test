@@ -295,35 +295,34 @@ class TestModelAssembler:
         """
         
         # 步骤 1: 分析 U 和 I
-        print("--- 步骤 1: 分析 U 和 I ---")
+        print("---  分析M(U,I,B,C) ---")
         static_spec = self.analyzer.analyze_static(requirement, code_context)
-        structured_req = static_spec.model_dump()
-        print(json.dumps(structured_req, indent=2, ensure_ascii=False))
+        # structured_req = static_spec.model_dump()
+        # print(json.dumps(structured_req, indent=2, ensure_ascii=False))
 
-        # 步骤 2: 分析 B
-        print("--- 步骤 2: 分析 B ---")
+        # 分析 B
         behavior_spec = self.analyzer.analyze_behavior(requirement, code_context)
-        structured_req = behavior_spec.model_dump()
-        print(json.dumps(structured_req, indent=2, ensure_ascii=False))
+        # structured_req = behavior_spec.model_dump()
+        # print(json.dumps(structured_req, indent=2, ensure_ascii=False))
         
-        # 步骤 3: 派生 C
-        print("--- 步骤 3: 派生 C ---")
+        # 派生 C
         constraint_vectors = self.deriver.derive(
             i_spec=static_spec.interface_specification,
             requirement=requirement
         )
         # constraint_vectors = self.deriver._derive_all_V(static_spec.interface_specification, requirement)
-        structured_req = constraint_vectors.model_dump()
-        print(json.dumps(structured_req, indent=2, ensure_ascii=False))
+        # structured_req = constraint_vectors.model_dump()
+        # print(json.dumps(structured_req, indent=2, ensure_ascii=False))
         
         # 步骤 4: 组装最终的扁平化 M(U,I,B,C)
-        print("--- 步骤 4: 组装最终的 M(U,I,B,C) ---")
         full_model = FullTestModel(
             unit_under_test=static_spec.unit_under_test,
             interface_specification=static_spec.interface_specification,
             behavioral_model=behavior_spec,
             constraints=constraint_vectors
         )
+        structured_req = full_model.model_dump()
+        print(json.dumps(structured_req, indent=2, ensure_ascii=False))
         
         return full_model
 

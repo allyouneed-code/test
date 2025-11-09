@@ -48,6 +48,10 @@ class StaticDifferentialValidator:
 
         self.llm_cache: Dict[tuple, bool] = {}
         
+        self.structured_llm = self.llm_client.with_structured_output(
+            BatchValidationReport,
+            method="function_calling" # 假设使用 function_calling，可以根据需要调整
+        )
         # 报告结构
         self.report = {
             "matches": [],              # 一致的项
@@ -66,53 +70,17 @@ class StaticDifferentialValidator:
         """
         print("--- 启动静态差分验证 ---")
         
-        # 步骤 1: 验证接口 (M_req.I vs M_code.S)
-        print("  (1/2) 正在验证接口...")
-        self._validate_interface()
 
-        # 步骤 3: 验证行为 (M_req.B vs M_code.G/P)
-        print("  (2/2) 正在验证行为逻辑...")
-        self._validate_behavior()
+
+        # 验证行为 (M_req.B vs M_code.G/P)
+        print("  正在进行需求代码一致性验证")
+        self._validate_behavior_batch()
 
         print("--- 验证完成 ---")
         return self.report
 
-    # --- 检查点 1: 接口验证 ---
-    def _validate_interface(self):
-        """
-        检查点 1: 验证 M_req.I (接口) 和 M_code.S (静态接口)。
-        """
-        try:
-            # 1a: 验证单元ID
-            req_id = self.m_req.unit_under_test.identifier
-            code_id = self.m_code['A']['Id']
-            if req_id == code_id:
-                self.report['matches'].append(f"单元ID一致: {req_id}")
-            else:
-                self.report['gaps_req_to_code'].append(f"ID不匹配: 需求为 '{req_id}', 代码为 '{code_id}'")
-
-            # 1b: 验证参数 (仅检查名称)
-            req_params = {p.name for p in self.m_req.interface_specification.input_parameters}
-            code_params = {p['name'] for p in self.m_code['S']['Arg_in']}
-            
-            if req_params == code_params:
-                self.report['matches'].append(f"参数列表一致: {req_params}")
-            else:
-                missing_in_code = req_params - code_params
-                missing_in_req = code_params - req_params
-                if missing_in_code:
-                    self.report['gaps_req_to_code'].append(f"代码中缺失参数: {missing_in_code}")
-                if missing_in_req:
-                    self.report['gaps_code_to_req'].append(f"需求中缺失参数: {missing_in_req}")
-
-            # (未来扩展: 在此处添加对 M_req.I.external_dependencies 和 M_code.S.C_ext 的验证)
-
-        except KeyError as e:
-            self.report['errors'].append(f"接口验证失败：模型中缺少键 {e}")
-        except Exception as e:
-            self.report['errors'].append(f"接口验证时发生未知错误: {e}")
-
-    # --- 检查点 2: 行为验证 (准备) ---
+    
+    # --- 检查点: 行为验证 (准备) ---
     def _extract_predicates(self) -> Tuple[Set[str], Set[str]]:
         """从两个模型中提取原始的谓词字符串集合。"""
         req_conditions = set()

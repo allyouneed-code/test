@@ -3,6 +3,7 @@ import json
 import ast
 from staticfg import CFGBuilder
 import astunparse
+from typing import List, Dict, Any, Optional
 
 class CodeAnalyzer:
     """
@@ -250,6 +251,95 @@ class CodeAnalyzer:
             "C_ext": self.external_calls # 使用 __init__ 中收集的结果
         }
 
+class CodeUnitDecomposer:
+    """
+    一个代码单元分解器。
+    
+    它负责解析一个完整的 Python 源代码文件（字符串），
+    并将其拆分为一个“被测单元”列表，其中每个单元都是一个
+    独立的函数（FunctionDef）或类方法（ClassDef 内的 FunctionDef）。
+    
+    这个类的输出是 CodeAnalyzer 的理想输入。
+    """
+
+    class _FunctionVisitor(ast.NodeVisitor):
+        """
+        一个AST访问者，用于查找并提取所有函数和方法定义。
+        """
+        def __init__(self):
+            # 存储提取的单元
+            # "name": 函数名
+            # "class_context": 如果是方法，则为类名；否则为 None
+            # "code": 该函数的完整源代码字符串
+            self.units: List[Dict[str, Any]] = []
+            self.current_class_name: Optional[str] = None
+
+        def visit_ClassDef(self, node: ast.ClassDef):
+            """
+            当我们访问一个类时，记录下当前类的名称，
+            然后继续访问该类的子节点（即方法）。
+            """
+            self.current_class_name = node.name
+            # 遍历类的主体以查找方法
+            self.generic_visit(node)
+            # 离开类后，重置类名
+            self.current_class_name = None
+
+        def visit_FunctionDef(self, node: ast.FunctionDef):
+            """
+            当我们访问一个函数（或方法）时，将其提取出来。
+            """
+            try:
+                # 使用 ast.unparse 将AST节点转换回源代码字符串
+                # 这是自 Python 3.9+ 以来的标准方法
+                code_str = ast.unparse(node)
+            except AttributeError:
+                # 备用方案，以防 unparse 不可用 (尽管它应该是)
+                code_str = "# [Error] 无法 unparse 此函数"
+            
+            unit = {
+                "name": node.name,
+                "class_context": self.current_class_name,
+                "code": code_str,
+                "ast_node": node  # 存储原始节点以供将来使用
+            }
+            self.units.append(unit)
+            
+            # **重要**:
+            # 我们在这里故意 *不* 调用 self.generic_visit(node)。
+            # 这可以防止它递归地查找并提取 *嵌套函数*。
+            # 对于单元测试，我们通常只关心最外层的函数/方法
+            # 作为“被测单元”。嵌套函数被视为其父函数的一部分。
+
+    def __init__(self, source_code_str: str):
+        """
+        初始化分解器。
+        
+        参数:
+            source_code_str (str): 要分析的完整 Python 源代码。
+        """
+        self.source_code = source_code_str
+        self.ast_tree = None
+        
+        try:
+            self.ast_tree = ast.parse(self.source_code)
+        except SyntaxError as e:
+            print(f"代码分解器错误：源代码存在语法错误，无法解析。 {e}")
+            raise
+
+    def decompose(self) -> List[Dict[str, Any]]:
+        """
+        执行分解，返回所有找到的单元。
+
+        返回:
+            一个字典列表，每个字典代表一个函数或方法。
+        """
+        if not self.ast_tree:
+            return []
+            
+        visitor = self._FunctionVisitor()
+        visitor.visit(self.ast_tree)
+        return visitor.units
 
 if __name__ == "__main__":
     

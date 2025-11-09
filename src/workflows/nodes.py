@@ -8,30 +8,36 @@ from langchain_community.callbacks import get_openai_callback
 from .schemas import WorkflowState
 from ..tools.code_inspector import CodeAnalyzer
 from ..tools.requirement_analyzer import RequirementAnalyzer
+from ..tools.requirement_analyzer import TestModelAssembler, FullTestModel
+from ..tools.validator import StaticDifferentialValidator, BatchValidationReport
 from ..tools.code_executer import execute_tests_and_get_report
 from ..tools.mutation_tester import run_mutation_test
 from ..llm.client import get_llm_client
 
 
 def code_analyzer_node(state: WorkflowState) -> dict:
-    """节点1: 代码分析"""
+    """代码分析"""
     print("--- 步骤1：代码分析 ---")
     analyzer = CodeAnalyzer(state["code"])
     final_model = analyzer.process()
     report_str = json.dumps(final_model, indent=2, ensure_ascii=False)
-    return {"analysis_report": report_str}
+    return {"analysis_report": report_str,
+             "analysis_model": final_model
+           }
 
 def requirement_analyzer_node(state: WorkflowState) -> dict:
-    """节点2: 需求分析"""
+    """需求分析"""
     print("--- 步骤2：需求分析 ---")
     try:
         with get_openai_callback() as cb:
-            analyzer = RequirementAnalyzer()
-            analysis_result = analyzer.analyze(state["requirement"], state["code"])
-            report_str = json.dumps(analysis_result, indent=2, ensure_ascii=False)           
-            print(f"  -> LLM Call Tokens (Requirement Analysis): {cb.total_tokens} (Prompt: {cb.prompt_tokens}, Completion: {cb.completion_tokens})")
+            assembler = TestModelAssembler()
+            analysis_result: FullTestModel = assembler.build(state["requirement"], state["code"])
+            analysis_result_dict = analysis_result.model_dump()
+            report_str = json.dumps(analysis_result_dict, indent=2, ensure_ascii=False)                    
+            
         return {
             "structured_requirement": report_str,
+            "requirement_model": analysis_result,
             "total_prompt_tokens": state["total_prompt_tokens"] + cb.prompt_tokens,
             "total_completion_tokens": state["total_completion_tokens"] + cb.completion_tokens,
             "total_tokens": state["total_tokens"] + cb.total_tokens,
@@ -39,7 +45,39 @@ def requirement_analyzer_node(state: WorkflowState) -> dict:
     except Exception as e:
         error_msg = f"Requirement analysis failed: {e}"
         print(f"ERROR: {error_msg}")
-        return {"structured_requirement": json.dumps({"error": error_msg})}
+        return {"structured_requirement": json.dumps({"error": error_msg}),
+                "requirement_model": None}
+
+def validator_node(state: WorkflowState) -> dict:
+    """
+    节点: 静态差分验证
+    对比 M_req (需求模型) 和 M_code (代码模型)。
+    """
+    print("--- 静态差分验证 ---")
+    
+    m_req: FullTestModel = state.get("requirement_model")
+    m_code: dict = state.get("analysis_model")
+
+    if not m_req or not m_code:
+        error_msg = "Skipping validation: Requirement model or Code model is missing."
+        print(f"  -> WARNING: {error_msg}")
+        return {"validation_report": json.dumps({"error": error_msg})}
+
+    try:
+        llm = get_llm_client(temperature=0.0)
+        
+        validator = StaticDifferentialValidator(m_req=m_req, m_code=m_code, llm_client=llm)
+        
+        report = validator.validate()
+        report_str = json.dumps(report, indent=2, ensure_ascii=False)
+        
+        print("  -> Validation Report Generated.")
+        return {"validation_report": report_str}
+        
+    except Exception as e:
+        error_msg = f"Static validation failed: {e}"
+        print(f"ERROR: {error_msg}")
+        return {"validation_report": json.dumps({"error": error_msg})}
 
 
 def prompt_organizer_node(state: WorkflowState, logic_filename: str) -> dict:
@@ -83,75 +121,160 @@ def prompt_organizer_node(state: WorkflowState, logic_filename: str) -> dict:
     """
     return {"generation_prompt": prompt_template}
 
-def test_generator_node(state: WorkflowState) -> dict:
+def test_creator_node(state: WorkflowState) -> dict:
     """
-    节点4: 测试用例生成
-    调用 LLM，根据 Prompt 生成测试代码。
-    如果存在上一轮的反馈，会一并考虑。
+    节点4.1: 测试用例创造者 (LLM 1)
+    从0到1，根据完整的Prompt“创造”测试代码的第一个版本。
+    (此节点不再处理反馈)
     """
-    print("--- 步骤4：生成用例 ---")
+    print("--- 步骤4.1：生成测试用例草稿 (Creator) ---")
     llm = get_llm_client(temperature=0.2)
-    # 检查是否存在反馈。如果存在，说明是迭代优化阶段。
-    if feedback := state.get("evaluation_feedback"):
-        print("  -> 检测到反馈，进行测试用例修复和改进...")
-        prompt = f"""
-        **任务: 修复并改进现有的测试用例**
+    prompt = state["generation_prompt"]
 
-        你是一名资深的测试工程师。上一轮生成的测试用例不够健壮，未能通过质量检测。
-        请根据下面提供的“改进建议”，对“上一轮的测试代码”进行修改，以解决所有已知问题。
-
-        **上一轮的测试代码:**
-        ```python
-        {state['test_code']}
-        ```
-
-        **改进建议/上一轮运行结果的问题:**
-        ---
-        {feedback}
-        ---
-
-        **待测试源代码 (供参考):**
-        ```python
-        {state['code']}
-        ```
-
-        **输出要求:**
-        - **只在 markdown 的代码块 (```python ... ```) 中输出修复后的、完整的 Python 测试代码。**
-        - 不要包含任何额外的解释或评论。
-        - 确保新的测试用例能够覆盖改进建议中提到的所有盲点。
-        """
-    else:
-        # 如果没有反馈，说明是第一次生成，使用原始的、最详细的Prompt
-        prompt = state["generation_prompt"]
-
-    
-    # 使用 get_openai_callback 上下文管理器来追踪 Token
     with get_openai_callback() as cb:
         response = llm.invoke(prompt)
-        print(f"  -> LLM Call Tokens: {cb.total_tokens} (Prompt: {cb.prompt_tokens}, Completion: {cb.completion_tokens})")
+        print(f"  -> LLM Call Tokens (Creator): {cb.total_tokens} (Prompt: {cb.prompt_tokens}, Completion: {cb.completion_tokens})")
 
-    # 查找被 ```python 和 ``` 包围的代码块
     try:
-        # 通常 LLM 的返回格式是 ```python\n...code...\n```
         test_code = response.content.split("```python")[1].split("```")[0].strip()
     except IndexError:
-        # 如果格式不是 ```python，尝试通用的 ```
-        try:
-            test_code = response.content.split("```")[1].split("```")[0].strip()
-        except IndexError:
-            # 如果连 ``` 都没有，就认为整个返回都是代码（作为最后的备用方案）
-            print("  -> WARNING: Could not find markdown fences. Assuming entire response is code.")
-            test_code = response.content.strip()
-    # ==================== 修改结束 ====================
+        print("  -> WARNING: Could not find markdown fences. Assuming entire response is code.")
+        test_code = response.content.strip()
     
-    print("  -> Extracted Test Code:\n", test_code) # 增加一行打印，方便调试
+    print("  -> Extracted Test Code (Draft):\n", test_code)
+    
     return {
-        "test_code": test_code,
+        "test_code": test_code, # 输出到 test_code 供 Reviewer 审查
         "total_prompt_tokens": state["total_prompt_tokens"] + cb.prompt_tokens,
         "total_completion_tokens": state["total_completion_tokens"] + cb.completion_tokens,
         "total_tokens": state["total_tokens"] + cb.total_tokens,
     }
 
+def test_reviewer_node(state: WorkflowState) -> dict:
+    """
+    节点: 测试用例审查者 (LLM 2)
+    在执行前，对测试代码草稿进行“逻辑审查”，防止明显的 F-Case。
+    """
+    print("--- 审查测试用例逻辑 (Reviewer) ---")
+    llm = get_llm_client(temperature=0.0) 
+    
+    draft_test_code = state["test_code"]
+    
+    prompt = f"""
+    **任务: 审查测试用例的逻辑正确性**
+
+    你是一名资深的QA专家。请审查以下测试代码草稿，确保它的断言（asserts）在逻辑上是正确的，并且与源代码的行为一致。
+
+    **待测试源代码:**
+    ```python
+    {state['code']}
+    ```
+
+    **用户原始需求:**
+    {state['requirement']}
+
+    **测试代码草稿:**
+    ```python
+    {draft_test_code}
+    ```
+
+    **审查指南:**
+    1.  **检查断言逻辑:** * `？
+        * 断言中的error逻辑是否和代码逻辑相符`？
+        * 用例的输入和预期的输出是否正确对应？
+        * `assert` 的预期值是否符合代码逻辑？
+    2.  **检查导入:** 导入语句是否正确？
+    3.  **不要质疑需求**：假设源代码和需求是正确的，只审查测试代码是否*同时*符合这两者。
+
+    **输出要求:**
+    - **如果测试代码草稿在逻辑上是完美的**：原封不动地返回该代码。
+    - **如果测试代码草稿有逻辑错误**：返回修复了逻辑错误后的*完整*代码。
+    - **只在 markdown 的代码块 (```python ... ```) 中输出最终的 Python 测试代码。** 不要包含任何解释。
+    """
+
+    with get_openai_callback() as cb:
+        response = llm.invoke(prompt)
+        print(f"  -> LLM Call Tokens (Reviewer): {cb.total_tokens} (Prompt: {cb.prompt_tokens}, Completion: {cb.completion_tokens})")
+
+    try:
+        validated_test_code = response.content.split("```python")[1].split("```")[0].strip()
+    except IndexError:
+        print("  -> WARNING: Reviewer did not use markdown. Using full response.")
+        validated_test_code = response.content.strip()
+    
+    print("  -> Validated Test Code:\n", validated_test_code)
+    
+    return {
+        "test_code": validated_test_code, # 覆盖原始草稿，准备执行
+        "total_prompt_tokens": state["total_prompt_tokens"] + cb.prompt_tokens,
+        "total_completion_tokens": state["total_completion_tokens"] + cb.completion_tokens,
+        "total_tokens": state["total_tokens"] + cb.total_tokens,
+    }
+
+def test_refiner_node(state: WorkflowState) -> dict:
+    """
+    节点4.3: 测试用例修复者 (LLM 3)
+    在“质量循环”中被调用，
+    只修复技术错误（E-Cases）或覆盖率不足（Coverage）。
+    """
+    print("--- 步骤4.3：修复技术/覆盖率问题 (Refiner) ---")
+    llm = get_llm_client(temperature=0.1) # 使用低温 "修复者"
+    
+    feedback = state["evaluation_feedback"] # 这个反馈只包含 E-Case 或 Coverage
+    
+    prompt = f"""
+    **任务: 修复测试套件**
+
+    你是一名专业的Python测试工程师。上一轮的测试代码在执行时遇到了技术错误或覆盖率不足。
+    请根据“执行反馈”，修复“上一轮的测试代码”。
+
+    **上一轮的测试代码:**
+    ```python
+    {state['test_code']}
+    ```
+
+    **执行反馈 (需要修复的问题):**
+    ---
+    {feedback}
+    ---
+    
+    **待测试源代码 (供参考):**
+    ```python
+    {state['code']}
+    ```
+
+    **修复指南:**
+    - 如果反馈是 `ImportError`，请修复 `from ... import ...` 语句。
+    - 如果反馈是 `SyntaxError`，请修复 Python 语法。
+    - 如果反馈是 `Missing lines: ...`，请添加*新的*测试用例来覆盖这些缺失的行。
+    - 如果反馈包含“**关于测试强度的反馈 (来自变异测试)**”，请仔细阅读“具体弱点”，并补充*新的*、*更强*的测试用例来杀死（kill）那些存活的变异体。
+    - **不要**修改那些*已经通过*的测试用例的 `assert` 逻辑（除非变异测试反馈明确指出了一个逻辑弱点）。
+    - **不要**修改那些*已经通过*的测试用例的 `assert` 逻辑。
+
+    **输出要求:**
+    - **只在 markdown 的代码块 (```python ... ```) 中输出修复后的、完整的 Python 测试代码。**
+    - 不要包含任何额外的解释或评论。
+    """
+    
+    with get_openai_callback() as cb:
+        response = llm.invoke(prompt)
+        print(f"  -> LLM Call Tokens (Refiner): {cb.total_tokens} (Prompt: {cb.prompt_tokens}, Completion: {cb.completion_tokens})")
+
+    try:
+        refined_test_code = response.content.split("```python")[1].split("```")[0].strip()
+    except IndexError:
+        print("  -> WARNING: Refiner did not use markdown. Using full response.")
+        refined_test_code = response.content.strip()
+    
+    print("  -> Refined Test Code:\n", refined_test_code)
+    
+    return {
+        "test_code": refined_test_code, # 覆盖上一轮代码，准备重新执行
+        "retry_count": state.get('retry_count', 0) + 1, # 增加重试计数
+        "total_prompt_tokens": state["total_prompt_tokens"] + cb.prompt_tokens,
+        "total_completion_tokens": state["total_completion_tokens"] + cb.completion_tokens,
+        "total_tokens": state["total_tokens"] + cb.total_tokens,
+    }
 
 def test_executor_node(state: WorkflowState, logic_filename: str, test_filename: str) -> dict:
     """
@@ -176,8 +299,11 @@ def test_executor_node(state: WorkflowState, logic_filename: str, test_filename:
         
         coverage = cov_metrics.get('covered_percentage', 0.0) / 100.0
         pass_rate = test_exec.get('pass_rate', 0.0)
+        test_failures = test_exec.get('failed', 0)
+        test_errors = test_exec.get('error', 0)
         
         execution_feedback_parts.append(f"Coverage: {coverage:.2%}, Pass Rate: {pass_rate:.2%}.")
+        execution_feedback_parts.append(f"Failures: {test_failures}, Errors: {test_errors}.")
         if missing_lines := cov_metrics.get('missing_lines'):
             execution_feedback_parts.append(f"Missing lines: {missing_lines}.")
         
@@ -192,6 +318,8 @@ def test_executor_node(state: WorkflowState, logic_filename: str, test_filename:
     return {
         "coverage": coverage,
         "pass_rate": pass_rate,
+        "test_failures": test_failures,
+        "test_errors": test_errors,
         "execution_feedback": feedback
     }
 
@@ -202,41 +330,31 @@ def result_evaluator_node(state: WorkflowState, coverage_threshold: float) -> di
     """
     print("--- 步骤6：评估结果 ---")
     current_retries = state.get('retry_count', 0)
+    test_errors = state.get("test_errors", 0)
+    coverage = state.get("coverage", 0.0)
+
+    if test_errors > 0:
+        print(f"  -> 质量评估: 发现 {test_errors} 个执行错误 (E-Cases)。")
+        # 提取 E-Case 的详细信息进行修复
+        feedback_for_refiner = "Please fix the following execution errors:\n" + state['execution_feedback']
+        return {
+            "evaluation_result": "RETRY_QUALITY",
+            "evaluation_feedback": feedback_for_refiner
+        }
+    if coverage < coverage_threshold:
+        print(f"  -> 质量评估: 覆盖率 ({coverage:.2%}) 未达标。")
+        # 提取覆盖率信息进行修复
+        feedback_for_refiner = f"Coverage ({coverage:.2%}) is below threshold ({coverage_threshold:.2%}). Please add tests for:\n" + state['execution_feedback']
+        return {
+            "evaluation_result": "RETRY_QUALITY",
+            "evaluation_feedback": feedback_for_refiner
+        }
     
-    if state["pass_rate"] >= 1.0 and state["coverage"] >= coverage_threshold:
-        print("  -> Objective metrics met. Test suite accepted.")
-        grade = "pass"
-        feedback = "The test suite meets all quality standards."
-    else:
-        print("  -> Objective metrics not met. Using raw execution feedback for the next run.")
-        grade = "not pass"
-        feedback = state['execution_feedback']
-
-    # --- 打印迭代总结 ---
-    print("\n" + "="*20 + f" Iteration #{current_retries + 1} Summary " + "="*20)
-    if grade == "not pass":
-        print(f"  - Feedback for Next Round:\n{feedback}")
-    print("="*61)
-
-    history = state.get("iteration_history", [])
-    history.append({
-        "iteration": current_retries + 1,
-        "test_code": state["test_code"],
-        "pass_rate": state["pass_rate"],
-        "coverage": state["coverage"],
-        "feedback": feedback
-    })
-
-    print(f"  -> Evaluation Grade: {grade}")
-
-    return_data = {
-        "evaluation_result": grade,
-        "evaluation_feedback": feedback,
-        "retry_count": current_retries + 1,
-        "iteration_history": history
+    print("  -> 质量评估: 质量达标 (0 Errors, Coverage {coverage:.2%})。")
+    return {
+        "evaluation_result": "QUALITY_MET",
+        "evaluation_feedback": "" # 无需反馈
     }
-
-    return return_data
 
 def mutation_test_node(state: WorkflowState, app_config: dict) -> dict:
     """
@@ -296,13 +414,13 @@ def mutation_test_node(state: WorkflowState, app_config: dict) -> dict:
             "mutation_score": score,
             "mutation_test_has_error": False,
             "evaluation_feedback": qa_feedback,  
-            "evaluation_result": "not pass",   
+            "evaluation_result": "RETRY_MUTATION",   
             "mutation_details": result.get("details", "No details available.")
         }
 
     # 如果工具正常运行，则正常返回分数
     return {
-        "mutation_score": result.get("mutation_score", 0.0),
+        "mutation_score": score,
         "mutation_test_has_error": False,
         "mutation_details": result.get("details", "No details available.")
     }

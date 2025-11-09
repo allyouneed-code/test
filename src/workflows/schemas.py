@@ -1,6 +1,6 @@
 # src/workflows/schemas.py
 
-from typing import TypedDict, Literal, List
+from typing import TypedDict, Literal, List, Any
 from pydantic import BaseModel, Field
 
 class IterationLog(TypedDict):
@@ -11,6 +11,17 @@ class IterationLog(TypedDict):
     coverage: float
     feedback: str
 
+EvaluationResult = Literal[
+    "NOT_STARTED",        # 初始状态
+    "RETRY_QUALITY",      # 质量循环：因E-Case或覆盖率不足而重试
+    "QUALITY_MET",        # 质量循环：通过（0 E-Case, 覆盖率达标）
+    "FAIL_F_CASE",        # 最终裁决：因F-Case而失败（硬停止）
+    "PASS_TO_MUTATION",   # 最终裁决：通过（0 F-Case），进入变异测试
+    "RETRY_MUTATION",     # 变异测试：失败，触发修复
+    "PASS_FINAL",         # 变异测试：通过，流程成功结束
+    "FAIL_CRITICAL"       # 任何阶段的工具或严重错误
+]
+
 class WorkflowState(TypedDict):
     """定义工作流中传递的状态"""
     # 核心数据
@@ -20,15 +31,21 @@ class WorkflowState(TypedDict):
     structured_requirement: str    # 结构化需求报告 (JSON 字符串)
     generation_prompt: str     # 用于生成测试用例的最终 Prompt
     test_code: str             # 生成的测试用例代码
+
+    analysis_model: Any        # (来自 code_analyzer) 代码分析的原始字典模型
+    requirement_model: Any     # (来自 requirement_analyzer) 需求分析的Pydantic模型 (FullTestModel)
+    validation_report: str     # (来自 validator_node) 静态验证报告 (JSON string)
     
     # 结果与迭代
     coverage: float            # 测试覆盖率
     pass_rate: float           # 测试通过率
-    execution_feedback: str    # 来自测试执行器的反馈 (例如，未覆盖的行)
-    evaluation_result: str     # 评估者的最终决定 ("pass" or "not pass")
-    evaluation_feedback: str   # 评估者给出的改进建议
-    retry_count: int           # 重试次数
-    iteration_history: List[IterationLog] # 迭代日志
+    test_failures: int         # 测试失败 (F cases) 的数量
+    test_errors: int           # 测试错误 (E cases) 的数量
+
+    execution_feedback: str    # 来自测试执行器的原始反馈
+
+    evaluation_result: EvaluationResult  # 当前的评估状态
+    evaluation_feedback: str   # *专门*用于“修复者”的反馈
     
     # 成本与效率指标
     start_time: float               # 工作流开始时间戳
