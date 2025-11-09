@@ -1,5 +1,6 @@
 import os
 import json
+import ast
 from staticfg import CFGBuilder
 import astunparse
 
@@ -14,8 +15,24 @@ class CodeAnalyzer:
     - A (被分析单元): 仅存根 (Stub)
     - S (静态接口): 仅存根 (Stub)
     """
+# --- 内部类：用于AST遍历 ---
+    class _CallVisitor(ast.NodeVisitor):
+        """一个简单的访问者，用于收集函数体内的所有调用。"""
+        def __init__(self):
+            self.calls = []
+        
+        def visit_Call(self, node):
+            # 尝试获取一个可读的函数名 (e.g., 'print', 'os.path.exists')
+            try:
+                func_name = ast.unparse(node.func)
+            except: 
+                func_name = "complex_call"
+            
+            # 简化：只收集函数名，不合并行号
+            self.calls.append(func_name)
+            self.generic_visit(node)
 
-    def __init__(self, source_code_str: str):
+    def __init__(self, source_code_str: str, filename: str = "source_code_string"):
         """
         初始化提取器。
         
@@ -28,14 +45,22 @@ class CodeAnalyzer:
             exit()
             
         self.source_code = source_code_str
+        self.filename = filename
         # cfg_blocks 将存储来自 staticfg 的原始块
         self.cfg_blocks = []
         # model 将存储最终的 M_code 字典
+        self.ast_tree = None
+        self.primary_function_node = None # 存储找到的第一个 FunctionDef
+        self.external_calls = []
         self.model = {
             "A": {},
             "S": {},
             "G": {}
         }
+        self.ast_tree = ast.parse(self.source_code)
+            # 立即分析 AST 以填充 A 和 S 的数据
+        self._find_primary_function()
+        self._find_external_calls()
 
     def process(self) -> dict:
         """
@@ -61,6 +86,31 @@ class CodeAnalyzer:
         return self.model
 
     # --- 私有方法 (Private Methods) ---
+    def _find_primary_function(self):
+        """遍历 AST，找到第一个函数定义并存储它。"""
+        if not self.ast_tree:
+            return
+        for node in ast.walk(self.ast_tree):
+            if isinstance(node, ast.FunctionDef):
+                self.primary_function_node = node
+                return # 找到第一个函数，停止
+
+    def _find_external_calls(self):
+        """使用 _CallVisitor 遍历主函数体，收集外部调用。"""
+        if not self.primary_function_node:
+            return # 没有函数可供分析
+        
+        visitor = self._CallVisitor()
+        # 只访问主函数体，而不是整个文件
+        visitor.visit(self.primary_function_node) 
+        
+        # 去重并格式化
+        unique_calls = set(visitor.calls)
+        self.external_calls = [
+            {"target_signature": call_name, "call_locations": []} # 位置信息被简化
+            for call_name in unique_calls
+        ]
+
 
     def _run_staticfg(self):
         """
@@ -141,45 +191,93 @@ class CodeAnalyzer:
         步骤 4a: 构建 A (被分析单元) 模型。
         (存根实现)
         """
-        self.model["A"] = {
-            "Id": "check_age",  # 假设值
-            "Type": "Function", # 假设值
-            "Location": "my_function.py" # 假设值
-        }
+        if self.primary_function_node:
+            self.model["A"] = {
+                "Id": self.primary_function_node.name,
+                "Type": "Function",
+                "Location": self.filename
+            }
+        else:
+            self.model["A"] = {"Id": "Not_Found", "Type": "Unknown", "Location": self.filename}
 
     def _build_model_S(self):
         """
         步骤 4b: 构建 S (静态接口) 模型。
         (存根实现 - 这需要完整的 AST 解析)
         """
+        if not self.primary_function_node:
+            self.model["S"] = {"Arg_in": [], "T_out": "Unknown", "C_ext": []}
+            return
+
+        func_node = self.primary_function_node
+        
+        # 1. 解析参数 (Arg_in)
+        arg_list = []
+        args = func_node.args.args
+        defaults = func_node.args.defaults
+        defaults_offset = len(args) - len(defaults)
+        
+        for i, arg in enumerate(args):
+            arg_name = arg.arg
+            static_type = ast.unparse(arg.annotation) if arg.annotation else "Any"
+            
+            default_val = None
+            if i >= defaults_offset:
+                default_ast = defaults[i - defaults_offset]
+                try:
+                    # 尝试获取常量值 (e.g., 5, "hello", None)
+                    default_val = ast.literal_eval(default_ast)
+                except (ValueError, TypeError, SyntaxError):
+                    # 如果不是简单常量 (e.g., a function call), 则unparse
+                    try:
+                        default_val = ast.unparse(default_ast)
+                    except:
+                        default_val = "ComplexDefaultValue"
+                        
+            arg_list.append({
+                "name": arg_name, 
+                "static_type": static_type, 
+                "default_value": default_val
+            })
+        
+        # 2. 解析返回类型 (T_out)
+        return_type = ast.unparse(func_node.returns) if func_node.returns else "Any"
+        
+        # 3. 填充模型
         self.model["S"] = {
-            "Arg_in": [
-                {"name": "age", "static_type": "Any", "default_value": None} # 假设值
-            ],
-            "T_out": "String", # 假设值
-            "C_ext": [
-                {"target_signature": "print", "call_locations": []} # 假设值
-            ]
+            "Arg_in": arg_list,
+            "T_out": return_type,
+            "C_ext": self.external_calls # 使用 __init__ 中收集的结果
         }
 
 
 if __name__ == "__main__":
     
-    # 1. 定义源文件路径 (假设 my_function.py 在上一级目录)
-    SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-    TARGET_FILE = os.path.join(SCRIPT_DIR, '..', 'my_function.py')
+    # 6. 更新示例代码，使其自包含
+    sample_code = """
+import os # 外部导入
 
-    if not os.path.exists(TARGET_FILE):
-        print(f"错误：在 {TARGET_FILE} 未找到目标文件 my_function.py")
-        exit()
+def calculate(a: int, b: int, operation: str = 'add'):
+    '''一个简单的计算器'''
+    if not isinstance(a, (int, float)) or not isinstance(b, (int, float)):
+        raise TypeError("Inputs must be numeric")
+    
+    print(f"Calculating {a} {operation} {b}") # 外部调用
+    
+    if operation == 'add':
+        return a + b
+    if operation == 'subtract':
+        return a - b
+    if operation == 'divide':
+        if b == 0:
+            return "Error: Division by zero"
+        return a / b
+    return None
+"""
 
-    # 2. 读取源代码
-    print(f"正在从 {TARGET_FILE} 读取源文件...")
-    with open(TARGET_FILE, 'r', encoding='utf-8') as f:
-        code_to_analyze = f.read()
-
-    # 3. (核心) 初始化对象并处理
-    extractor = CodeAnalyzer(code_to_analyze)
+    # (核心) 初始化对象并处理
+    # 传入 "calculate_example.py" 作为虚拟文件名
+    extractor = CodeAnalyzer(sample_code, filename="calculate_example.py")
     final_model = extractor.process()
 
     # 4. 打印最终的、精简的 JSON

@@ -11,45 +11,40 @@ class UnitUnderTest(BaseModel):
     """
     定义了规约的主体 (Unit Under Test, UUT)。
     """
-    identifier: str = Field(description="被测元素的完全限定名称 (FQN)，例如：'calculate'。")
-    desc: str = Field(description="能力描述 (desc)，对该业务能力的简短、无歧义的自然语言描述。")
-    source: Optional[List[str]] = Field(
-        default=None,
-        description="需求溯源 (source)。(可选)，一个或多个指向原始需求文档中相关描述的锚点。")
-
+    identifier: str = Field(description="唯一标识符")
+    desc: str = Field(description="能力描述")
+    source: Optional[List[str]] = Field(default=None, description="需求溯源")
+    
 #2 I: 接口规约
 class InputParameter(BaseModel):
-    """定义单个输入参数。"""
-    name: str = Field(description="参数的标识符。")
-    desc: str = Field(description="输入参数的自然语言描述")
-    constraints: List[str] = Field(description="对参数的语义约束，例如：'不允许为 None', '必须是数字'。")
+    name: str = Field(description="输入信息的标识符")
+    desc: str = Field(description="输入信息描述")
+    constraints: List[str] = Field(description="对该信息的语义限制列表") # 保持 List[str] 以匹配示例 [cite: 150]
 
 class OutputParameter(BaseModel):
-    """
-    单个输出参数规约。
-    """
-    name: str = Field(description="输出信息的标识符 (name)。")
-    constraints: List[str] = Field(description="对返回值的预期约束。")
-    semantics: str = Field(description="对返回值的业务含义的自然语言描述。")
+    name: str = Field(description="输出信息的标识符")
+    constraints: List[str] = Field(description="对返回值的预期约束")
+    semantics: str = Field(description="对返回值的业务含义的自然语言描述")
+
 
 class ExternalDependency(BaseModel):
     """定义需要被 Mock 的外部依赖。"""
     name: str = Field(description="依赖组件的名称。")
-    info_needed: List[str] = Field(description="所需信息或方法")
+    info_needed: List[str] = Field(description="所需外部信息或方法")
     contract: str = Field(description="对这些被调用方法行为的语义描述")
 
 class InterfaceSpecification(BaseModel):
     """
     定义 UUT 的静态边界。
     """
-    input_parameters: List[InputParameter] = Field(description="输入参数规约的集合 (P_in)。")
-    output_specification: List[OutputParameter] = Field(description="输出参数规约 (P_out)。")
-    external_dependencies: List[ExternalDependency] = Field(description="外部依赖的集合 (D_ext)。")
+    input_parameters: List[InputParameter] = Field(description="输入信息的集合 。")
+    output_specification: List[OutputParameter] = Field(description="输出信息的集合。")
+    external_dependencies: List[ExternalDependency] = Field(description="外部依赖的集合")
 
 #3 B: 行为模型
 class FunctionalScenario(BaseModel):
     """定义单个功能场景。"""
-    id: str = Field(description="场景的唯一标识符，例如：'F-001'。")
+    id: str = Field(description="场景的唯一标识符。")
     description: str = Field(description="场景的简短自然语言描述。")
     pre_conditions: List[str] = Field(description="此场景发生必须满足的逻辑谓词")
     post_conditions: List[str] = Field(description="执行后必须为真的逻辑谓词")
@@ -65,8 +60,8 @@ class BehavioralModel(BaseModel):
     """
     定义 UUT 的动态逻辑和业务规则。
     """
-    functional_scenarios: List[FunctionalScenario] = Field(description="功能场景的集合 (S_func)。")
-    error_scenarios: List[ErrorScenario] = Field(description="错误场景的集合 (S_err)。")
+    functional_scenarios: List[FunctionalScenario] = Field(description="功能场景的集合。")
+    error_scenarios: List[ErrorScenario] = Field(description="错误场景的集合。")
 
 # --- 联合的中间模型 ---
 class StaticSpecification(BaseModel):
@@ -147,32 +142,28 @@ class RequirementAnalyzer:
         
         # --- 深度优化的 PROMPT：针对 U, I模型 ---
         prompt = f"""
-        **目标:** 你是一名顶级的软件测试分析师。你的任务是深度解析用户需求和源代码，并将它们严格映射到形式化的语义模型 M=(U, I, B) 中。
+        **目标:** 你是一名顶级的软件测试分析师。你的任务是深度解析用户需求，并将它们严格映射到形式化的语义模型 M=(U, I) 中，输出 Pydantic 模式。
 
         **用户需求:**
         {requirement}
 
-        **源代码上下文:**
-        ```python
-        {code_context}
-        ```
-
         **分析指南 (严格遵守):**
 
-        1.  **`unit_under_test (U)`:**
-            * `identifier`: 识别函数或类的完全限定名称（例如：'calculate'）。
-            * `granularity`: 对其进行分类（例如：'Function'）。
+        1.  **unit_under_test (U)**:
+            * `identifier`: 需求的核心功能点名称唯一标识符。
+            * `desc`: 对该业务能力的简短、无歧义的自然语言描述。
+            * `source`: 列出需求中提到的任何溯源信息（如章节、条款等）。如果未提及，必须返回 `null`。
 
-        2.  **`interface_specification (I)`:**
-            * `input_parameters (P_in)`: 列出每一个参数。
-                * `name`: 参数的名称（例如：'a', 'b', 'operation'）。
-                * `param_type`: 从代码中推断出的类型（例如：'int, float', 'str'）。
-                * `constraints`: 应用于参数的所有检查（例如：从 `isinstance` 推断）。
-            * `output_specification (P_out)`:
-                * `return_type`: 函数返回什么？（例如：'int, float, str, None'）。
-                * `semantics`: 返回值意味着什么？（例如：'计算结果或错误消息'）。
-            * `external_dependencies (D_ext)`:
-                * 列出所有外部调用。**对于此代码，这是一个空数组 `[]`**，因为它没有导入或调用其他模块。
+        2.  **interface_specification (I)**:
+            * `input_parameters `: 识别需求中提到的所有输入参数，并为每个参数提供：
+                * `name`: 参数名称。
+                * `desc`: 参数的自然语言描述。
+                * `constraints`: 参数的语义限制列表。
+            * `output_specification (P_out)`: 描述需求的预期输出，包括：
+                * `name`: 输出名称。
+                * `constraints`: 对返回值的预期约束。
+                * `semantics`: 对返回值的业务含义的自然语言描述。
+            * `external_dependencies (D_ext)`: 识别需求中提到的任何外部依赖。如果未提及，必须返回一个空列表 `[]`。
 
         请立即开始分析，并返回符合 `StaticSpecification` 的 JSON 对象。
         """
@@ -197,42 +188,36 @@ class RequirementAnalyzer:
         
         # --- 深度优化的 PROMPT：针对 B 模型 ---
         prompt = f"""
-        **目标:** 你是一名顶级的软件测试分析师。你的任务是深度解析用户需求和源代码，并将它们严格映射到形式化的语义模型 M=(U, I, B) 中。
+        **目标:** 你是一名顶级的软件测试分析师。你的任务是深度解析用户需求，并将它们严格映射到形式化的语义模型BehavioralModel中。
 
         **用户需求:**
         {requirement}
 
-        **源代码上下文:**
-        ```python
-        {code_context}
-        ```
 
         **分析指南 (严格遵守):**
 
 
         **`behavioral_model (B)`:**
 
-            * **`functional_scenarios (S_func)`:** 为每个有效的逻辑分支（例如：'add', 'subtract', 'multiply', 'divide'）创建一个场景。
+            * **`functional_scenarios (S_func)`:** 为每个有效的功能创建一个场景。
 
-                * `id`:必须提供一个唯一的场景ID,例如：'F-ADD'。
+                * `id`:必须提供一个唯一的场景ID。
 
-                * `description`: 例如：'执行加法操作'。
+                * `description`: 功能场景描述。
 
-                * `pre_conditions`: 来自代码的条件（例如：`['operation == "add"']`）。
+                * `pre_conditions`: 前置条件的简短精炼描述。
 
-                * `post_conditions`: 预期的结果（例如：`['return a + b']`）。
+                * `post_conditions`: 预期的结果的简短精炼描述。
 
-            * **`error_scenarios (S_err)`:** 为需求或代码中提到的每个错误情况、异常或边缘情况创建一个场景。
+            * **`error_scenarios (S_err)`:** 为需求中提到的每个错误情况、异常或边缘情况创建一个场景。
 
-                * `id`:必须提供一个唯一的场景ID,例如：'E-TYPE'。
+                * `id`:必须提供一个唯一的场景ID。
 
-                * `description`: 例如：'处理无效的输入类型'。
+                * `description`: 错误场景描述。
 
-                * `error_conditions`: 触发条件（例如：`['not isinstance(a, (int, float)) or not isinstance(b, (int, float))']`）。
+                * `error_conditions`: 触发条件的简短精炼描述。
 
-                * `expected_outcome`: 确切的错误响应（例如：`'raise TypeError("Inputs must be numeric")'`）。
-
-                * **重要提示:** 要为 'Division by zero' 和 'Invalid operation' (即 'return None' 的情况) 创建单独的场景。
+                * `expected_outcome`: 确切的错误响应。
 
         请立即开始分析，并返回符合 `BehavioralModel` 的 JSON 对象。
         """
