@@ -371,22 +371,124 @@ if __name__ == "__main__":
     # 测试用例：C语言转过来的 Python 类
     sample_class_code = """
 import math
-from dataclasses import dataclass
 
-@dataclass
-class MpuData:
-    accX: float
-    accY: float
-    accZ: float
-
-class AHRSSolver:
-    def __init__(self, kp: float = 0.5):
+class IMUAngleEstimator:
+    def __init__(self):
+        # 初始化四元数 [q0, q1, q2, q3]，初始状态为 [1, 0, 0, 0]
         self.q0 = 1.0
-        self.Kp = kp
+        self.q1 = 0.0
+        self.q2 = 0.0
+        self.q3 = 0.0
+        
+        # 积分误差累积 (Integral Error)
+        self.exInt = 0.0
+        self.eyInt = 0.0
+        self.ezInt = 0.0
+        
+        # 当前解算出的欧拉角
+        self.pitch = 0.0
+        self.roll = 0.0
+        self.yaw = 0.0
+        
+        # 垂直方向加速度分量
+        self.norm_acc_z = 0.0
 
-    def GetAngle(self, pMpu: MpuData, dt: float) -> tuple:
-        norm = math.sqrt(pMpu.accX**2 + pMpu.accY**2)
-        return (0.0, 0.0, 0.0)
+        # --- 参数配置 (需要根据实际硬件调整) ---
+        self.KpDef = 0.5          # 比例增益
+        self.KiDef = 0.0003       # 积分增益
+        # 弧度转角度常数 (180 / PI)
+        self.RtA = 57.2957795
+        
+        # 陀螺仪灵敏度系数 (假设值，需根据实际 sensor 调整，例如将 LSB 转为 rad/s)
+        # 原代码中的 Gyro_Gr
+        self.Gyro_Gr = 0.0010653 
+        # 原代码中的 Gyro_G (用于Yaw积分的单位转换)
+        self.Gyro_G = 0.03051756 
+
+    def fast_inv_sqrt(self, x):
+        if x == 0:
+            return 0
+        return 1.0 / math.sqrt(x)
+
+    def get_angle(self, acc_x, acc_y, acc_z, gyro_x, gyro_y, gyro_z, dt):
+        half_time = dt * 0.5
+        
+        # 1. 提取重力向量 (从四元数推导出的重力方向)
+        # 对应 C 代码: 提取有效旋转矩阵中的重力分量
+        vx = 2 * (self.q1 * self.q3 - self.q0 * self.q2)
+        vy = 2 * (self.q0 * self.q1 + self.q2 * self.q3)
+        vz = 1.0 - 2 * (self.q1 * self.q1 + self.q2 * self.q2)
+
+        # 2. 加速度归一化
+        norm = self.fast_inv_sqrt(acc_x**2 + acc_y**2 + acc_z**2)
+        ax = acc_x * norm
+        ay = acc_y * norm
+        az = acc_z * norm
+
+        # 3. 向量叉积 (计算测量重力与估算重力的误差)
+        # ex, ey, ez 为误差向量
+        ex = (ay * vz - az * vy)
+        ey = (az * vx - ax * vz)
+        ez = (ax * vy - ay * vx)
+
+        # 4. 误差积分 (Integral)
+        self.exInt += ex * self.KiDef
+        self.eyInt += ey * self.KiDef
+        self.ezInt += ez * self.KiDef
+
+        # 5. 陀螺仪数据校正 (Proportional + Integral)
+        # 将误差反馈到陀螺仪数据中，在此处将单位转为弧度/秒
+        gx = gyro_x * self.Gyro_Gr + self.KpDef * ex + self.exInt
+        gy = gyro_y * self.Gyro_Gr + self.KpDef * ey + self.eyInt
+        gz = gyro_z * self.Gyro_Gr + self.KpDef * ez + self.ezInt
+
+        # 6. 四元数更新 (一阶龙格库塔法 / 欧拉积分)
+        q0_t = (-self.q1 * gx - self.q2 * gy - self.q3 * gz) * half_time
+        q1_t = ( self.q0 * gx - self.q3 * gy + self.q2 * gz) * half_time
+        q2_t = ( self.q3 * gx + self.q0 * gy - self.q1 * gz) * half_time
+        q3_t = (-self.q2 * gx + self.q1 * gy + self.q0 * gz) * half_time
+
+        self.q0 += q0_t
+        self.q1 += q1_t
+        self.q2 += q2_t
+        self.q3 += q3_t
+
+        # 7. 四元数归一化
+        norm_q = self.fast_inv_sqrt(self.q0**2 + self.q1**2 + self.q2**2 + self.q3**2)
+        self.q0 *= norm_q
+        self.q1 *= norm_q
+        self.q2 *= norm_q
+        self.q3 *= norm_q
+
+        # 8. 计算欧拉角 (转换回角度)
+        # 重新计算旋转矩阵中 Z 轴的分量
+        vecx_z = 2 * self.q1 * self.q3 - 2 * self.q0 * self.q2
+        vecy_z = 2 * self.q2 * self.q3 + 2 * self.q0 * self.q1
+        vecz_z = 1.0 - 2 * self.q1 * self.q1 - 2 * self.q2 * self.q2
+
+        # --- Yaw (偏航角) 计算 ---
+        # C代码中有 #ifdef YAW_GYRO 分支。
+        # 分支 #else (通常用于6轴传感器): 使用陀螺仪Z轴积分，并带有死区过滤
+        yaw_g_val = gyro_z * self.Gyro_G
+        # 死区处理：如果转动太小则视为静止飘移，不积分
+        if yaw_g_val > 0.8 or yaw_g_val < -0.8:
+            self.yaw += yaw_g_val * dt
+        
+        # 如果你想用四元数算 Yaw (C代码中的 #ifdef YAW_GYRO 部分)，逻辑如下：
+        # self.yaw = math.atan2(2 * self.q1 * self.q2 + 2 * self.q0 * self.q3, 
+        #                       1 - 2 * self.q2 * self.q2 - 2 * self.q3 * self.q3) * self.RtA
+
+        # --- Pitch (俯仰角) ---
+        # 注意 C 代码中有一个负号 -asin
+        self.pitch = -math.asin(vecx_z) * self.RtA
+
+        # --- Roll (横滚角) ---
+        self.roll = math.atan2(vecy_z, vecz_z) * self.RtA
+
+        # 9. 计算 Z 轴垂直加速度 (去除重力分量后的运动加速度估算)
+        self.norm_acc_z = acc_x * vecx_z + acc_y * vecy_z + acc_z * vecz_z
+
+        return self.pitch, self.roll, self.yaw
 """
     sample_class_code2 = """
 def calculate(a, b, operation):
@@ -406,6 +508,6 @@ def calculate(a, b, operation):
 """
 
     print("--- 分析 Class ---")
-    extractor = CodeAnalyzer(sample_class_code2, filename="ahrs.py")
+    extractor = CodeAnalyzer(sample_class_code, filename="ahrs.py")
     model = extractor.process()
     print(json.dumps(model, indent=2, ensure_ascii=False))

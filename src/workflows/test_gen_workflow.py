@@ -10,7 +10,7 @@ from langgraph.graph import StateGraph, END
 from .schemas import WorkflowState
 from . import nodes as wf_nodes
 from ..config import app_config
-from ..reporting import WorkflowReporter
+from ..report.reporter_console import WorkflowReporter
 
 class TestGenerationWorkflow:
     """

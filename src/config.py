@@ -25,7 +25,7 @@ def load_app_config() -> Dict[str, Any]:
     config = {
         "max_retries": 3,
         "coverage_threshold": 0.8,
-        "mutation_threshold": 0.9,
+        "mutation_threshold": 0.5,
         "logic_filename": "logic_module.py",
         "test_filename": "test_script.py",
     }

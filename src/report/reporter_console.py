@@ -2,7 +2,7 @@
 
 import time
 from typing import Dict, Any
-from .workflows.schemas import WorkflowState, EvaluationResult
+from ..workflows.schemas import WorkflowState, EvaluationResult
 import json
 
 class WorkflowReporter:

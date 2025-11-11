@@ -7,7 +7,7 @@ from docx import Document
 
 from src.config import app_config
 from src.workflows.test_gen_workflow import TestGenerationWorkflow
-from src.reporting import WorkflowReporter
+from src.report import WorkflowReporter, DocxWorkflowReporter
 
 
 # --- 导入项目模块 ---
@@ -146,6 +146,13 @@ def main():
         print("\n--- 生成报告 ---")
         reporter = WorkflowReporter(final_state, app_config)
         reporter.generate_report()
+
+        # 8. 生成 Word 报告 (Docx Report)
+        print("\n--- 生成 Word 报告 ---")
+        output_docx = f"Test_Report_{int(time.time())}.docx"
+        # 使用从 src.report 导入的 DocxWorkflowReporter
+        docx_reporter = DocxWorkflowReporter(final_state, output_filename=output_docx)
+        docx_reporter.generate()
 
     except FileNotFoundError as e:
         print(f"\n❌ 文件错误: {e}")

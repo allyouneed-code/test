@@ -15,6 +15,40 @@ from ..tools.mutation_tester import run_mutation_test
 from ..llm.client import get_llm_client
 
 
+def _compress_and_clean_report(report_json_str: str) -> str:
+    """
+    清洗并压缩代码分析报告：
+    1. 剔除 CFG 节点中冗余的源代码副本 ('statements' 字段)。
+    2. 移除 JSON 中的空格和换行。
+    """
+    if not report_json_str:
+        return "{}"
+    
+    try:
+        data = json.loads(report_json_str)
+        
+        # 1. 针对性清洗：移除 Code Inspector 报告中 G (CFG) 节点的 statements
+        # 原因：这些是源码的拷贝，LLM 对照源码即可，无需在 Prompt 中重复
+        if isinstance(data, dict) and "G" in data and "Nodes" in data["G"]:
+            for node in data["G"]["Nodes"]:
+                if "statements" in node:
+                    del node["statements"]
+        
+        # 2. 格式压缩：去除空格和换行 (separators)
+        return json.dumps(data, ensure_ascii=False, separators=(',', ':'))
+        
+    except Exception as e:
+        print(f"Warning: Report compression failed: {e}")
+        return report_json_str
+
+def _compress_json(json_str: str) -> str:
+    """通用 JSON 压缩，仅去除空格"""
+    try:
+        data = json.loads(json_str)
+        return json.dumps(data, ensure_ascii=False, separators=(',', ':'))
+    except:
+        return json_str
+
 def code_analyzer_node(state: WorkflowState) -> dict:
     """代码分析"""
     print("--- 步骤1：代码分析 ---")
@@ -85,8 +119,14 @@ def prompt_organizer_node(state: WorkflowState, logic_filename: str) -> dict:
     节点3: Prompt 组织
     整合用户需求和代码分析报告，构建一个高质量的 Prompt。
     """
-    print("--- 步骤3：prompt组织 ---")
+    print("--- 步骤3：prompt组织 (Optimized) ---")
     module_name = os.path.splitext(logic_filename)[0]
+    
+    # 1. 数据准备与压缩
+    # 清洗分析报告 (Token 降幅最大)
+    clean_analysis_report = _compress_and_clean_report(state.get('analysis_report', '{}'))
+    # 压缩需求结构 (去除格式空格)
+    clean_struct_req = _compress_json(state.get('structured_requirement', '{}'))
     prompt_template = f"""
     **目标:** 生成一个全面的 pytest 测试套件。
 
@@ -98,7 +138,7 @@ def prompt_organizer_node(state: WorkflowState, logic_filename: str) -> dict:
     **结构化需求分析 (您设计测试用例的主要指南):**
     这个结构化分析将用户的请求分解为具体的、可操作的测试场景。
     ```json
-    {state['structured_requirement']}
+    {clean_struct_req}
     ```
 
     **待测试源代码:**
@@ -107,9 +147,9 @@ def prompt_organizer_node(state: WorkflowState, logic_filename: str) -> dict:
     ```
 
     **静态代码分析报告:**
-    这份报告提供了对代码结构、复杂性和潜在问题的深入洞察。用它来进一步完善您的测试用例。
+    这份报告提供了代码结构的信息。用它来进一步完善您的测试用例。
     ```json
-    {state['analysis_report']}
+    {clean_analysis_report}
     ```
 
     **任务:**
@@ -117,6 +157,7 @@ def prompt_organizer_node(state: WorkflowState, logic_filename: str) -> dict:
     - **至关重要，您必须从 `{module_name}` 模块导入待测试的函数。** 例如: `from {module_name} import your_function_name`。
     - 测试代码必须是完整且可运行的。
     - 确保您生成的测试覆盖了结构化分析中概述的所有场景。
+    - 除非源代码中有明确的raise语句，否则不要编写预期值错误、类型错误或任何异常的测试。如果代码通过返回None、0.0或隐式处理无效输入（如Python的默认TypeError）来处理无效输入，则测试必须断言该特定行为，而不是你发明的异常。
     - **只在 markdown 的代码块 (```python ... ```) 中输出测试套件的 Python 代码。** 不要包含任何其他文本或解释。
     """
     return {"generation_prompt": prompt_template}
@@ -181,6 +222,7 @@ def test_reviewer_node(state: WorkflowState) -> dict:
     **审查指南:**
     1.  **检查断言逻辑:** * `？
         * 断言中的error逻辑是否和代码逻辑相符`？
+        * 代码没实现这个功能
         * 用例的输入和预期的输出是否正确对应？
         * `assert` 的预期值是否符合代码逻辑？
     2.  **检查导入:** 导入语句是否正确？
@@ -326,31 +368,49 @@ def test_executor_node(state: WorkflowState, logic_filename: str, test_filename:
 def result_evaluator_node(state: WorkflowState, coverage_threshold: float) -> dict:
     """
     节点6: 结果评估 
-    优先使用客观指标进行判断，只有在不达标时才让 LLM 生成反馈。
+    逻辑：
+    1. F-Case > 0 -> FAIL_F_CASE (硬失败，不重试)
+    2. E-Case > 0 -> RETRY (尝试自动修复语法/环境错误)
+    3. Coverage < Threshold -> RETRY (尝试补充测试用例)
+    4. All Good -> QUALITY_MET (进入变异测试)
     """
     print("--- 步骤6：评估结果 ---")
-    current_retries = state.get('retry_count', 0)
-    test_errors = state.get("test_errors", 0)
-    coverage = state.get("coverage", 0.0)
-
-    if test_errors > 0:
-        print(f"  -> 质量评估: 发现 {test_errors} 个执行错误 (E-Cases)。")
-        # 提取 E-Case 的详细信息进行修复
-        feedback_for_refiner = "Please fix the following execution errors:\n" + state['execution_feedback']
+    
+    # 1. 优先检查 F-Case (测试逻辑失败)
+    # 如果断言失败，通常意味着测试代码对业务逻辑理解有误(幻觉)，或者是业务代码本身有Bug。
+    # 此时不应盲目重试，而应停止并报告。
+    test_failures = state.get("test_failures", 0)
+    if test_failures > 0:
+        print(f"  -> 质量评估: 发现 {test_failures} 个测试失败 (F-Cases)。判定为质量不达标，停止流程。")
         return {
-            "evaluation_result": "RETRY_QUALITY",
-            "evaluation_feedback": feedback_for_refiner
+            "evaluation_result": "FAIL_F_CASE",
+            "evaluation_feedback": f"测试套件执行失败，存在 {test_failures} 个断言错误 (F-Cases)。请人工检查业务逻辑与测试预期是否一致。"
         }
-    if coverage < coverage_threshold:
-        print(f"  -> 质量评估: 覆盖率 ({coverage:.2%}) 未达标。")
-        # 提取覆盖率信息进行修复
-        feedback_for_refiner = f"Coverage ({coverage:.2%}) is below threshold ({coverage_threshold:.2%}). Please add tests for:\n" + state['execution_feedback']
+
+    # 2. 检查 E-Case (执行/语法错误)
+    # 这类错误通常是 import 错误、语法错误等，LLM 很有机会自动修复。
+    test_errors = state.get("test_errors", 0)
+    if test_errors > 0:
+        print(f"  -> 质量评估: 发现 {test_errors} 个执行错误 (E-Cases)。触发重试修复。")
+        feedback_for_refiner = "Please fix the following execution errors (Syntax/Import/Runtime):\n" + state.get('execution_feedback', '')
         return {
             "evaluation_result": "RETRY_QUALITY",
             "evaluation_feedback": feedback_for_refiner
         }
     
-    print("  -> 质量评估: 质量达标 (0 Errors, Coverage {coverage:.2%})。")
+    # 3. 检查覆盖率
+    coverage = state.get("coverage", 0.0)
+    if coverage < coverage_threshold:
+        print(f"  -> 质量评估: 覆盖率 ({coverage:.2%}) 未达标 (目标 {coverage_threshold:.2%})。触发重试补充。")
+        feedback_for_refiner = f"Coverage ({coverage:.2%}) is below threshold ({coverage_threshold:.2%}). Please add tests for:\n" + state.get('execution_feedback', '')
+        return {
+            "evaluation_result": "RETRY_QUALITY",
+            "evaluation_feedback": feedback_for_refiner
+        }
+    
+    # 4. 质量达标 (0 F-Case, 0 E-Case, Coverage OK)
+    # 只有到了这一步，才有资格进入变异测试
+    print(f"  -> 质量评估: 基础质量达标 (0 Errors, 0 Failures, Coverage {coverage:.2%})。准备进行变异测试。")
     return {
         "evaluation_result": "QUALITY_MET",
         "evaluation_feedback": "" # 无需反馈
@@ -393,23 +453,45 @@ def mutation_test_node(state: WorkflowState, app_config: dict) -> dict:
         }
     if score < mutation_threshold:
         print(f"  -> QA Failed. Mutation score ({score:.2%}) is too low.")
-        feedback_intro = (
-            f"**关于测试强度的反馈 (来自变异测试):\n** "
-            f"测试用例的健壮性不足。它的变异测试得分仅为 {score:.2%}，低于 {mutation_threshold:.2%} 的标准。\n"
-            f"**具体弱点:** 您的测试未能发现以下 {result.get('survived_count', 0)} 个潜在的bug：\n\n"
-        )
         
         survived_details = result.get("survived_details", [])
+        
+        # --- Token 熔断保护：Top-N 截断策略 ---
+        MAX_REPORT_LIMIT = 5  
+        
+        truncated_details = survived_details[:MAX_REPORT_LIMIT]
+        remaining_count = len(survived_details) - MAX_REPORT_LIMIT
+        
+        feedback_intro = (
+            f"**关于测试强度的反馈 (来自变异测试):**\n"
+            f"测试用例的健壮性不足。变异得分为 {score:.2%} (低于 {mutation_threshold:.2%})。\n"
+            f"共有 {len(survived_details)} 个变异体存活，以下是 **Top {len(truncated_details)}** 个典型案例：\n\n"
+        )
+        
         feedback_details = ""
-        for i, mutant in enumerate(survived_details, 1):
+        for i, mutant in enumerate(truncated_details, 1):
+            # 限制单个变异体描述的长度（防止某个变异体代码过长）
+            orig_code = mutant['original_code']
+            mut_code = mutant['mutated_code']
+            if len(orig_code) > 200: orig_code = orig_code[:200] + "..."
+            if len(mut_code) > 200: mut_code = mut_code[:200] + "..."
+
             feedback_details += (
-                f"  **{i}. 在第 {mutant['original_line_no']} 行:**\n"
-                f"     - 原始代码是: `{mutant['original_code']}`\n"
-                f"     - 当它被改成: `{mutant['mutated_code']}` 时, 您的测试依然通过了。\n"
-                f"     - **改进建议:** 请补充一个能区分这两种情况的测试用例。\n\n"
+                f"  **案例 {i}. (第 {mutant['original_line_no']} 行):**\n"
+                f"     - 原代码: `{orig_code}`\n"
+                f"     - 变异为: `{mut_code}`\n"
+                f"     - **问题:** 您的测试未报错（未杀死此变异）。请添加用例区分二者。\n\n"
+            )
+            
+        # 如果有截断，添加提示
+        if remaining_count > 0:
+            feedback_details += (
+                f"**... (还有 {remaining_count} 个变异体存活。为防止 Token 溢出已省略。**\n"
+                f"**策略:** 请先专注修复上述 {len(truncated_details)} 个问题。修复后，下一轮迭代将显示剩余的问题。)\n"
             )
 
         qa_feedback = feedback_intro + feedback_details
+        
         return {
             "mutation_score": score,
             "mutation_test_has_error": False,
