@@ -26,13 +26,13 @@ class DocxWorkflowReporter:
         style.element.rPr.rFonts.set(qn('w:eastAsia'), '微软雅黑')
         style.font.size = Pt(10.5)
         
-        # 设置标题样式颜色（可选）
+        # 设置标题样式颜色（可选，类似 Word 默认蓝）
         for i in range(1, 4):
             if f'Heading {i}' in self.doc.styles:
                 self.doc.styles[f'Heading {i}'].font.color.rgb = RGBColor(46, 116, 181)
 
     def generate(self):
-        print("  -> 正在生成 Word 报告 (包含完整模型定义)...")
+        print("  -> 正在生成 Word 报告 (包含完整节点信息)...")
         self._add_title()
         self._add_summary()
         
@@ -64,6 +64,7 @@ class DocxWorkflowReporter:
 
         # 4. 验证与测试
         self._add_validation_section()
+        self._add_traceability_matrix()
         self._add_test_code_section()
         
         try:
@@ -140,11 +141,10 @@ class DocxWorkflowReporter:
                 self._add_scenario_card(sc, "ERR")
 
     def _add_req_C_constraints(self, data):
-        """2.4 约束向量 (C) - 之前缺失的部分"""
+        """2.4 约束向量 (C)"""
         self.doc.add_heading('2.4 约束向量 (C - Constraints)', level=2)
         
         c_model = data.get('constraints', {})
-        # 兼容不同的 json 结构 (可能是 list 或 dict)
         param_constraints = c_model.get('param_constraints', []) if isinstance(c_model, dict) else []
         
         if not param_constraints:
@@ -159,24 +159,22 @@ class DocxWorkflowReporter:
             table.style = 'Table Grid'
             self._set_table_header(table, ['类型', '描述', '边界值 (Derived)'])
             
-            # 有效等价类
             for valid in pc.get('P_valid', []):
                 vals = valid.get('derived_values', [])
                 val_str = ", ".join(map(str, vals))
                 self._add_table_row(table, "有效 (Valid)", valid.get('description', ''), val_str)
             
-            # 无效等价类
             for invalid in pc.get('P_invalid', []):
                 vals = invalid.get('derived_values', [])
                 val_str = ", ".join(map(str, vals))
                 self._add_table_row(table, "无效 (Invalid)", invalid.get('description', ''), val_str)
             
-            self.doc.add_paragraph("") # 空行
+            self.doc.add_paragraph("")
 
     # ================= M_code 部分 =================
 
     def _add_code_A_unit_info(self, data):
-        """3.2 单元信息 (A) - 之前缺失的部分"""
+        """3.2 单元信息 (A)"""
         self.doc.add_heading('3.2 单元信息 (A - Unit Info)', level=2)
         a_model = data.get('A', {})
         
@@ -187,11 +185,10 @@ class DocxWorkflowReporter:
         self._add_table_row(table, "位置", a_model.get('Location', 'N/A'))
 
     def _add_code_S_static_interface(self, data):
-        """3.3 静态接口 (S) - 之前缺失的部分"""
+        """3.3 静态接口 (S)"""
         self.doc.add_heading('3.3 静态接口 (S - Static Interface)', level=2)
         s_model = data.get('S', {})
         
-        # 参数列表
         self.doc.add_paragraph("代码定义的参数:", style='Caption')
         args_in = s_model.get('Arg_in', [])
         if args_in:
@@ -203,7 +200,6 @@ class DocxWorkflowReporter:
         else:
             self.doc.add_paragraph("无参数或无法解析参数。", style='List Bullet')
 
-        # 外部调用
         c_ext = s_model.get('C_ext', [])
         if c_ext:
             self.doc.add_paragraph("检测到的外部调用:", style='Caption')
@@ -211,27 +207,67 @@ class DocxWorkflowReporter:
                 self.doc.add_paragraph(f"调用: {call.get('target_signature', '')}", style='List Bullet')
 
     def _add_code_G_control_flow(self, data):
-        """3.4 控制流图 (G)"""
+        """3.4 控制流与谓词 (G - CFG) - [完善版]"""
         self.doc.add_heading('3.4 控制流与谓词 (G - CFG)', level=2)
         g_model = data.get('G', {})
         
         nodes = g_model.get('Nodes', [])
         edges = g_model.get('Edges', [])
+        entry = g_model.get('Entry', 'N/A')
+        exit_points = g_model.get('Exit_Points', [])
         
+        # 摘要
         p = self.doc.add_paragraph()
-        p.add_run(f"总计: {len(nodes)} 个基本块, {len(edges)} 条跳转边。")
+        p.add_run(f"基本块数: {len(nodes)} | 跳转边数: {len(edges)} | 入口: {entry}")
         
+        # 1. 基本块详情 (Nodes)
+        if nodes:
+            self.doc.add_paragraph("基本块详情 (Control Flow Nodes):", style='Caption')
+            table = self.doc.add_table(rows=1, cols=2)
+            table.style = 'Table Grid'
+            # 固定列宽以防代码换行太乱
+            table.autofit = False
+            table.allow_autofit = False
+            table.columns[0].width = Inches(1.0) # ID 列
+            table.columns[1].width = Inches(5.0) # Code 列
+
+            self._set_table_header(table, ['节点ID', '代码语句 (Statements)'])
+            
+            for node in nodes:
+                node_id = node.get('id', 'N/A')
+                stmts = node.get('statements', [])
+                # 合并多行代码
+                stmt_text = "\n".join(stmts) if isinstance(stmts, list) else str(stmts)
+                
+                self._add_table_row(table, node_id, stmt_text)
+                
+                # 设置代码列字体为等宽
+                cell = table.rows[-1].cells[1]
+                for paragraph in cell.paragraphs:
+                    for run in paragraph.runs:
+                        run.font.name = 'Courier New'
+                        run.font.size = Pt(9)
+        
+        self.doc.add_paragraph("")
+
+        # 2. 跳转边 (Edges)
         if edges:
-            self.doc.add_paragraph("关键路径谓词 (Predicates):", style='Caption')
-            # 使用表格展示谓词，更整齐
+            self.doc.add_paragraph("关键路径谓词 (Edges & Predicates):", style='Caption')
             table = self.doc.add_table(rows=1, cols=3)
             table.style = 'Table Grid'
             self._set_table_header(table, ['源节点', '目标节点', '跳转条件 (Predicate)'])
             
             for edge in edges:
                 pred = edge.get('predicate', 'None')
-                if pred != 'None':
-                    self._add_table_row(table, edge.get('from_node_id'), edge.get('to_node_id'), pred)
+                # 展示所有跳转关系，有助于理解流程图
+                self._add_table_row(table, edge.get('from_node_id'), edge.get('to_node_id'), pred)
+        
+        # 3. 出口点
+        if exit_points:
+             self.doc.add_paragraph("")
+             self.doc.add_paragraph("出口点 (Exit Points):", style='Caption')
+             for ep in exit_points:
+                 self.doc.add_paragraph(f"• 节点 {ep.get('node_id')} -> {ep.get('exit_type')}", style='List Bullet')
 
     # ================= 通用辅助方法 =================
 
@@ -250,16 +286,25 @@ class DocxWorkflowReporter:
             for gap in gaps_req:
                 p = self.doc.add_paragraph()
                 run = p.add_run("✖ " + str(gap))
-                run.font.color.rgb = RGBColor(255, 0, 0) # Red
+                run.font.color.rgb = RGBColor(255, 0, 0)
         
-        # 4.2 匹配
+        # 4.2 冗余
+        gaps_code = val_data.get('gaps_code_to_req', [])
+        if gaps_code:
+            self.doc.add_heading(f'4.2 未定义代码逻辑 ({len(gaps_code)})', level=2)
+            for gap in gaps_code:
+                p = self.doc.add_paragraph()
+                run = p.add_run("? " + str(gap))
+                run.font.color.rgb = RGBColor(255, 165, 0)
+
+        # 4.3 匹配
         matches = val_data.get('matches', [])
         if matches:
-            self.doc.add_heading(f'4.2 一致项 ({len(matches)})', level=2)
+            self.doc.add_heading(f'4.3 一致项 ({len(matches)})', level=2)
             for m in matches:
                 p = self.doc.add_paragraph()
                 run = p.add_run("✔ " + str(m))
-                run.font.color.rgb = RGBColor(0, 128, 0) # Green
+                run.font.color.rgb = RGBColor(0, 128, 0)
 
     def _add_test_code_section(self):
         self.doc.add_heading('5. 最终测试代码', level=1)
@@ -280,11 +325,10 @@ class DocxWorkflowReporter:
         self._add_table_row(table, "覆盖率", f"{self.state.get('coverage', 0.0):.2%}")
         self._add_table_row(table, "通过率", f"{self.state.get('pass_rate', 0.0):.2%}")
         self._add_table_row(table, "F-Cases", str(self.state.get('test_failures', 0)))
+        self._add_table_row(table, "总耗时", f"{self.state.get('total_execution_time', 0):.2f}s")
 
     def _add_scenario_card(self, sc, type_tag):
-        """辅助：以卡片形式展示场景"""
         p = self.doc.add_paragraph()
-        # 边框绘制比较复杂，这里用背景色或粗体模拟
         prefix = "[功能]" if type_tag == "FUNC" else "[异常]"
         color = RGBColor(0, 0, 255) if type_tag == "FUNC" else RGBColor(200, 0, 0)
         
@@ -292,7 +336,6 @@ class DocxWorkflowReporter:
         run.bold = True
         run.font.color.rgb = color
         
-        # 详情
         detail_text = []
         if 'pre_conditions' in sc: detail_text.append(f"前置: {sc['pre_conditions']}")
         if 'error_conditions' in sc: detail_text.append(f"触发: {sc['error_conditions']}")
@@ -313,17 +356,14 @@ class DocxWorkflowReporter:
         for i, text in enumerate(headers):
             if i < len(hdr_cells):
                 hdr_cells[i].text = text
-                # 加粗
                 hdr_cells[i].paragraphs[0].runs[0].bold = True
-                # 设置背景色需要操作 XML，这里略过以保持代码简洁
 
     def _add_code_block(self, text):
         table = self.doc.add_table(rows=1, cols=1)
         cell = table.cell(0, 0)
-        # 设置浅灰色背景
         shading_elm = OxmlElement('w:shd')
         shading_elm.set(qn('w:val'), 'clear')
-        shading_elm.set(qn('w:fill'), 'F2F2F2') # 浅灰
+        shading_elm.set(qn('w:fill'), 'F2F2F2')
         cell._tc.get_or_add_tcPr().append(shading_elm)
         
         p = cell.paragraphs[0]
@@ -331,3 +371,99 @@ class DocxWorkflowReporter:
         for run in p.runs:
             run.font.name = 'Courier New'
             run.font.size = Pt(9)
+    
+    def _add_traceability_matrix(self):
+        """需求追溯矩阵 (RTM)"""
+        import ast # 确保导入 ast 模块
+        
+        self.doc.add_heading('4.3 需求追溯矩阵 (RTM)', level=2)
+        self.doc.add_paragraph("下表展示了测试用例与需求场景的覆盖对应关系：")
+
+        # --- 1. 解析测试代码，提取 @pytest.mark.requirement('ID') ---
+        mapping = {}
+        test_code = self.state.get('test_code', '')
+        try:
+            tree = ast.parse(test_code)
+            for node in ast.walk(tree):
+                if isinstance(node, ast.FunctionDef):
+                    for decorator in node.decorator_list:
+                        # 匹配装饰器
+                        if (isinstance(decorator, ast.Call) and 
+                            isinstance(decorator.func, ast.Attribute) and 
+                            decorator.func.attr == 'requirement' and decorator.args):
+                            try:
+                                # 兼容不同 Python 版本的 AST 节点类型
+                                arg = decorator.args[0]
+                                req_id = None
+                                if isinstance(arg, ast.Constant): # Python 3.8+
+                                    req_id = arg.value
+                                elif isinstance(arg, ast.Str):    # Python 3.7
+                                    req_id = arg.s
+                                
+                                if req_id:
+                                    if req_id not in mapping: mapping[req_id] = []
+                                    mapping[req_id].append(node.name)
+                            except: pass
+        except Exception as e:
+            print(f"解析测试代码失败: {e}")
+
+        # --- 2. 获取需求 ID 和 描述 ---
+        req_model = self._load_json(self.state.get('structured_requirement', '{}'))
+        req_info = {} # 格式: { "REQ-001": "描述文本..." }
+        
+        if req_model and 'behavioral_model' in req_model:
+            b_model = req_model['behavioral_model']
+            # 提取功能场景
+            for s in b_model.get('functional_scenarios', []):
+                sid = s.get('id')
+                if sid: req_info[sid] = s.get('description', 'N/A')
+            # 提取异常场景
+            for s in b_model.get('error_scenarios', []):
+                sid = s.get('id')
+                if sid: req_info[sid] = s.get('description', 'N/A')
+
+        # --- 3. 绘制 Word 表格 (4列) ---
+        # 列定义: ID | 描述 | 状态 | 测试用例
+        table = self.doc.add_table(rows=1, cols=4)
+        table.style = 'Table Grid'
+        
+        # 设置固定列宽 (总宽约 6-6.5 英寸)
+        # 需要确保 import Inches: from docx.shared import Inches
+        table.autofit = False 
+        table.columns[0].width = Inches(1.2) # ID
+        table.columns[1].width = Inches(2.8) # 描述 (最宽)
+        table.columns[2].width = Inches(0.8) # 状态
+        table.columns[3].width = Inches(1.5) # 测试用例
+
+        self._set_table_header(table, ['需求ID', '需求场景描述', '状态', '关联用例'])
+        
+        # 排序并填充
+        for rid in sorted(req_info.keys()):
+            desc = req_info[rid]
+            test_cases = mapping.get(rid, [])
+            
+            status = "已覆盖" if test_cases else "缺失"
+            cases_str = "\n".join(test_cases) if test_cases else "---" # 用换行符分隔多个用例更美观
+            
+            # 添加行
+            self._add_table_row(table, rid, desc, status, cases_str)
+            
+            # (可选优化) 如果缺失，将"状态"列标红
+            # 这里的 _add_table_row 是通用的，如果需要特定标红逻辑，可以单独写
+            if not test_cases:
+                # 获取刚才添加的那一行
+                row_cells = table.rows[-1].cells
+                # 将"缺失"二字标红 (需要更底层的 run 操作，这里简单演示思路)
+                # paragraphs[0].runs[0].font.color.rgb = RGBColor(255, 0, 0)
+                pass
+
+        # --- 4. 检查幻觉 ID (代码里写了但需求里没有的) ---
+        extra_ids = set(mapping.keys()) - set(req_info.keys())
+        if extra_ids:
+            self.doc.add_paragraph("") # 空行
+            self.doc.add_paragraph("[警告] 代码中发现了未定义的需求ID:", style='Caption')
+            table_extra = self.doc.add_table(rows=1, cols=3)
+            table_extra.style = 'Table Grid'
+            self._set_table_header(table_extra, ['未知ID', '描述', '关联用例'])
+            for rid in extra_ids:
+                self._add_table_row(table_extra, rid, "未知/未在模型中定义", "\n".join(mapping[rid]))

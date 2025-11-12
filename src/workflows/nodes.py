@@ -127,6 +127,18 @@ def prompt_organizer_node(state: WorkflowState, logic_filename: str) -> dict:
     clean_analysis_report = _compress_and_clean_report(state.get('analysis_report', '{}'))
     # 压缩需求结构 (去除格式空格)
     clean_struct_req = _compress_json(state.get('structured_requirement', '{}'))
+    req_model = state.get("requirement_model") # 这是一个 FullTestModel 对象 (Pydantic)
+    req_ids = []
+    if req_model:
+        # 提取功能场景 ID
+        if req_model.behavioral_model and req_model.behavioral_model.functional_scenarios:
+            for s in req_model.behavioral_model.functional_scenarios:
+                req_ids.append(f"- {s.id}: {s.description}")
+        # 提取异常场景 ID
+        if req_model.behavioral_model and req_model.behavioral_model.error_scenarios:
+            for s in req_model.behavioral_model.error_scenarios:
+                req_ids.append(f"- {s.id}: {s.description}")
+    req_id_list_str = "\n".join(req_ids)
     prompt_template = f"""
     **目标:** 生成一个全面的 pytest 测试套件。
 
@@ -135,11 +147,9 @@ def prompt_organizer_node(state: WorkflowState, logic_filename: str) -> dict:
     **用户原始需求:**
     {state['requirement']}
 
-    **结构化需求分析 (您设计测试用例的主要指南):**
-    这个结构化分析将用户的请求分解为具体的、可操作的测试场景。
-    ```json
-    {clean_struct_req}
-    ```
+    **需求覆盖项列表 (Traceability IDs):**
+    请确保你生成的测试用例能够覆盖以下所有需求项。
+    {req_id_list_str}
 
     **待测试源代码:**
     ```python
@@ -158,6 +168,7 @@ def prompt_organizer_node(state: WorkflowState, logic_filename: str) -> dict:
     - 测试代码必须是完整且可运行的。
     - 确保您生成的测试覆盖了结构化分析中概述的所有场景。
     - 除非源代码中有明确的raise语句，否则不要编写预期值错误、类型错误或任何异常的测试。如果代码通过返回None、0.0或隐式处理无效输入（如Python的默认TypeError）来处理无效输入，则测试必须断言该特定行为，而不是你发明的异常。
+    - **使用装饰器标记需求:** 对于每一个测试函数，你必须使用 `@pytest.mark.requirement("ID")` 装饰器来指明它覆盖了哪个需求 ID。
     - **只在 markdown 的代码块 (```python ... ```) 中输出测试套件的 Python 代码。** 不要包含任何其他文本或解释。
     """
     return {"generation_prompt": prompt_template}
@@ -263,7 +274,16 @@ def test_refiner_node(state: WorkflowState) -> dict:
     llm = get_llm_client(temperature=0.1) # 使用低温 "修复者"
     
     feedback = state["evaluation_feedback"] # 这个反馈只包含 E-Case 或 Coverage
-    
+    req_model = state.get("requirement_model")
+    req_ids = []
+    if req_model:
+        if req_model.behavioral_model and req_model.behavioral_model.functional_scenarios:
+            for s in req_model.behavioral_model.functional_scenarios:
+                req_ids.append(f"- {s.id}: {s.description}")
+        if req_model.behavioral_model and req_model.behavioral_model.error_scenarios:
+            for s in req_model.behavioral_model.error_scenarios:
+                req_ids.append(f"- {s.id}: {s.description}")
+    req_id_list_str = "\n".join(req_ids)
     prompt = f"""
     **任务: 修复测试套件**
 
@@ -285,13 +305,19 @@ def test_refiner_node(state: WorkflowState) -> dict:
     {state['code']}
     ```
 
+    **需求覆盖项列表 (供参考):**
+    {req_id_list_str}
+
     **修复指南:**
-    - 如果反馈是 `ImportError`，请修复 `from ... import ...` 语句。
-    - 如果反馈是 `SyntaxError`，请修复 Python 语法。
+    - 如果反馈是程序运行报错`Error`，请修复 Python 语法。
     - 如果反馈是 `Missing lines: ...`，请添加*新的*测试用例来覆盖这些缺失的行。
     - 如果反馈包含“**关于测试强度的反馈 (来自变异测试)**”，请仔细阅读“具体弱点”，并补充*新的*、*更强*的测试用例来杀死（kill）那些存活的变异体。
     - **不要**修改那些*已经通过*的测试用例的 `assert` 逻辑（除非变异测试反馈明确指出了一个逻辑弱点）。
     - **不要**修改那些*已经通过*的测试用例的 `assert` 逻辑。
+    - **[重要] 维护追溯性:**
+       - **绝对不要删除** 现有的 `@pytest.mark.requirement(...)` 装饰器，除非你删除了对应的测试函数。
+       - **为新用例添加标记:** 如果你添加了*新*的测试函数（例如为了覆盖率），**必须**从上面的“需求覆盖项列表”中选择一个最相关的 ID，并添加 `@pytest.mark.requirement("ID")` 装饰器。
+       - 如果新用例是为了覆盖具体的代码实现细节且难以对应到具体需求，可以使用 `@pytest.mark.requirement("impl_detail")`，但尽量对应到原始需求 ID。
 
     **输出要求:**
     - **只在 markdown 的代码块 (```python ... ```) 中输出修复后的、完整的 Python 测试代码。**
