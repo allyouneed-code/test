@@ -50,6 +50,12 @@ def _run_pytest_with_coverage(test_filename: str):
     print(f"[Pytest STDOUT]:\n{result.stdout}")
     print("-" * 50)
     
+    # --- 新增的调试代码 ---
+    if result.returncode != 0:
+        print(f"[Pytest STDERR (Error Info)]:\n{result.stderr}")
+        print("-" * 50)
+    # --- 结束 ---
+    
     return result
 
 def _parse_pytest_summary(output):
@@ -243,40 +249,47 @@ def execute_tests_and_get_report(logic_code: str, test_code: str, logic_filename
 #                            EXAMPLE USAGE
 # ----------------------------------------------------------------------
 
+# ----------------------------------------------------------------------
+#                            EXAMPLE USAGE
+# ----------------------------------------------------------------------
+
 if __name__ == "__main__":
     LOGIC_FILENAME = "logic_module.py"
     TEST_FILENAME = "test_script.py"
+    
     # 1. 业务逻辑代码
-    sample_logic_code = """
-def calculate(a, b, operation):
-    if operation == 'add':
-        return a + b
-    if operation == 'subtract':
-        return a - b
-    # 这一行是故意留下的未覆盖代码
-    if operation == 'multiply':
-        return a * b 
-    return None
-"""
+    # 使用 textwrap.dedent 修正缩进
+    sample_logic_code = textwrap.dedent("""
+    def calculate(a, b, operation):
+        if operation == 'add':
+            return a + b
+        if operation == 'subtract':
+            return a - b
+        # 这一行是故意留下的未覆盖代码
+        if operation == 'multiply':
+            return a * b 
+        return None
+    """)
     
     # 2. Pytest 风格测试用例代码
-    sample_test_code = f"""
-from {LOGIC_FILENAME.replace('.py', '')} import calculate 
+    # 同样使用 textwrap.dedent 修正缩进
+    sample_test_code = textwrap.dedent(f"""
+    from {LOGIC_FILENAME.replace('.py', '')} import calculate 
 
-def test_add_success():
-    assert calculate(5, 3, 'add') == 8
+    def test_add_success():
+        assert calculate(5, 3, 'add') == 8
 
-def test_subtract_success():
-    assert calculate(10, 4, 'subtract') == 6
+    def test_subtract_success():
+        assert calculate(10, 4, 'subtract') == 6
 
-def test_unsupported_operation():
-    # 确保覆盖到最后的 return None
-    assert calculate(10, 4, 'divide') is None
+    def test_unsupported_operation():
+        # 确保覆盖到最后的 return None
+        assert calculate(10, 4, 'divide') is None
 
-def test_add_failure_example():
-    # 模拟一个失败的用例
-    assert calculate(1, 1, 'add') == 3 # 实际是 2, 预期是 3
-"""
+    def test_add_failure_example():
+        # 模拟一个失败的用例
+        assert calculate(1, 1, 'add') == 3 # 实际是 2, 预期是 3
+    """)
     
     # 调用入口函数
     report = execute_tests_and_get_report(

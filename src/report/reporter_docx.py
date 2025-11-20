@@ -13,7 +13,7 @@ class DocxWorkflowReporter:
     """
     [Word版] 生成详尽的测试报告，完整可视化 M_req=(U,I,B,C) 和 M_code=(A,S,G)。
     """
-    def __init__(self, state: dict, output_filename: str = "Test_Generation_Report.docx"):
+    def __init__(self, state: dict, output_filename: str = "test_report/Test_Generation_Report.docx"):
         self.state = state
         self.output_filename = output_filename
         self.doc = Document()
@@ -68,6 +68,10 @@ class DocxWorkflowReporter:
         self._add_test_code_section()
         
         try:
+            output_dir = os.path.dirname(self.output_filename)
+            if output_dir: # 仅当路径包含目录时才创建
+                os.makedirs(output_dir, exist_ok=True)
+                
             self.doc.save(self.output_filename)
             print(f"[Report] Word document generated: {os.path.abspath(self.output_filename)}")
         except Exception as e:

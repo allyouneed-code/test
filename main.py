@@ -16,6 +16,7 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(current_dir)
 
 
+
 def read_file_content(filepath: str) -> str:
     """读取普通文本文件 (.py)"""
     if not os.path.exists(filepath):
@@ -68,67 +69,37 @@ def read_requirements_from_docx(filepath: str) -> str:
     except Exception as e:
         raise RuntimeError(f"读取 Word 文件失败: {e}")
 
-def main():
-    # 1. 解析命令行参数
-    parser = argparse.ArgumentParser(description="基于 LLM 的自动化单元测试生成工具")
-    parser.add_argument("req_file", help="需求文档路径 (.docx)")
-    parser.add_argument("code_file", help="待测试源代码路径 (.py)")
-    parser.add_argument("--logic_filename", default="logic_module.py", help="执行器使用的逻辑文件名 (默认: logic_module.py)")
-    parser.add_argument("--test_filename", default="test_script.py", help="执行器使用的测试文件名 (默认: test_script.py)")
-    
-    args = parser.parse_args()
-
-    print("\n" + "="*60)
-    print("🚀  启动自动化测试生成工作流")
-    print("="*60)
-
+def run_workflow(code_text: str, requirement_text: str):
+    """
+    运行测试生成工作流并打印报告。
+    (此函数封装了 main() 中的 try...except 逻辑)
+    """
     try:
-        # 2. 读取输入文件
-        print(f"正在读取需求文件: {args.req_file} ...")
-        requirement_text = read_requirements_from_docx(args.req_file)
-        
-        print(f"正在读取代码文件: {args.code_file} ...")
-        code_text = read_file_content(args.code_file)
-
-        # 3. 更新配置 (如果有命令行覆盖)
-        # 这里我们临时更新 app_config 中的文件名设置，以便执行器使用正确的文件名
-        app_config["logic_filename"] = args.logic_filename
-        app_config["test_filename"] = args.test_filename
+        # 3. 更新配置 (使用默认文件名，因为我们是动态传入内容)
+        # app_config["logic_filename"] = "logic_module.py" # 已在 config.py 中设置
+        # app_config["test_filename"] = "test_script.py"
 
         # 4. 初始化工作流
         print("正在构建工作流图...")
         workflow_builder = TestGenerationWorkflow(config=app_config)
         app = workflow_builder.build()
 
-        # 5. 构建初始状态 (Initial State)
-        # 必须初始化所有关键字段，尤其是我们在新架构中引入的字段
+        # 5. 构建初始状态 (与 main.py 相同)
         initial_state = {
             "code": code_text, 
             "requirement": requirement_text, 
-            
-            # 计数器与时间
             "retry_count": 0,
             "start_time": time.time(), 
-            
-            # Token 消耗统计
             "total_prompt_tokens": 0,
             "total_completion_tokens": 0, 
             "total_tokens": 0,
-            
-            # 历史记录与反馈
             "iteration_history": [],
             "execution_feedback": "",
-            
-            # 变异测试状态
             "mutation_test_has_error": False, 
             "mutation_error_details": "",
-            
-            # 新架构的关键状态
             "test_failures": 0,
             "test_errors": 0,
             "evaluation_result": "NOT_STARTED",
-            
-            # 空占位符 (防止 KeyError，虽然在 Python 3.10+ TypedDict 可能不需要，但在运行时为了安全)
             "analysis_report": "",
             "structured_requirement": "",
             "generation_prompt": "",
@@ -150,9 +121,42 @@ def main():
         # 8. 生成 Word 报告 (Docx Report)
         print("\n--- 生成 Word 报告 ---")
         output_docx = f"Test_Report_{int(time.time())}.docx"
-        # 使用从 src.report 导入的 DocxWorkflowReporter
         docx_reporter = DocxWorkflowReporter(final_state, output_filename=output_docx)
         docx_reporter.generate()
+        
+        print(f"\n✅ 工作流完成！报告已保存到 {output_docx}")
+
+    except FileNotFoundError as e:
+        print(f"\n❌ 文件错误: {e}")
+    except Exception as e:
+        print(f"\n❌ 发生未预期的错误: {e}")
+        import traceback
+        traceback.print_exc()
+
+def main():
+    # 1. 解析命令行参数
+    parser = argparse.ArgumentParser(description="基于 LLM 的自动化单元测试生成工具")
+    parser.add_argument("req_file", help="需求文档路径 (.docx)")
+    parser.add_argument("code_file", help="待测试源代码路径 (.py)")
+    parser.add_argument("--logic_filename", default="logic_module.py", help="执行器使用的逻辑文件名 (默认: logic_module.py)")
+    parser.add_argument("--test_filename", default="test_script.py", help="执行器使用的测试文件名 (默认: test_script.py)")
+    
+    args = parser.parse_args()
+
+    print("\n" + "="*60)
+    print("🚀  启动自动化测试生成工作流")
+    print("="*60)
+
+    try:
+        # 2. 读取输入文件
+        print(f"正在读取需求文件: {args.req_file} ...")
+        requirement_text = read_requirements_from_docx(args.req_file)
+        
+        print(f"正在读取代码文件: {args.code_file} ...")
+        code_text = read_file_content(args.code_file)
+        
+        # --- 调用新的核心函数 ---
+        run_workflow(code_text, requirement_text)
 
     except FileNotFoundError as e:
         print(f"\n❌ 文件错误: {e}")

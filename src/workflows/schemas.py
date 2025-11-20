@@ -13,7 +13,8 @@ class IterationLog(TypedDict):
 
 EvaluationResult = Literal[
     "NOT_STARTED",        # 初始状态
-    "RETRY_QUALITY",      # 质量循环：因E-Case或覆盖率不足而重试
+    "RETRY_E_CASE",       # 因执行错误(E-Case)重试
+    "RETRY_COVERAGE",     # 因覆盖率不足重试
     "QUALITY_MET",        # 质量循环：通过（0 E-Case, 覆盖率达标）
     "FAIL_F_CASE",        # 最终裁决：因F-Case而失败（硬停止）
     "PASS_TO_MUTATION",   # 最终裁决：通过（0 F-Case），进入变异测试

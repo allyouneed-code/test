@@ -31,7 +31,7 @@ class TestGenerationWorkflow:
         
         result = state.get("evaluation_result")
         
-        if result == "RETRY_QUALITY":
+        if result == "RETRY_E_CASE" or result == "RETRY_COVERAGE":
             if state.get("retry_count", 0) < self.max_retries:
                 print(f"  -> 路由: 质量不达标 (E-Case/Coverage)。路由到 [Refiner] (重试 {state.get('retry_count', 0) + 1}/{self.max_retries})")
                 return "test_refiner_node"
@@ -125,6 +125,7 @@ class TestGenerationWorkflow:
 
         graph.add_node("test_executor", test_executor_with_config)
         graph.add_node("quality_evaluator_node", quality_evaluator_with_config)
+        graph.add_node("feedback_summarizer", wf_nodes.feedback_summarizer_node)
         graph.add_node("test_refiner_node", wf_nodes.test_refiner_node) 
 
         graph.add_node("mutation_test_node", mutation_test_with_config)
@@ -140,15 +141,16 @@ class TestGenerationWorkflow:
         graph.add_edge("test_creator_node", "test_reviewer_node")
 
         # 阶段 3: 执行与质量循环
-        graph.add_edge("test_reviewer_node", "test_executor") # 首次执行
+        graph.add_edge("test_reviewer_node", "test_executor") 
         graph.add_edge("test_executor", "quality_evaluator_node")
+        graph.add_edge("feedback_summarizer", "test_refiner_node")
         graph.add_edge("test_refiner_node", "test_executor")
         # 添加条件分支
         graph.add_conditional_edges(
             "quality_evaluator_node",
             self.quality_router,
             {
-                "test_refiner_node": "test_refiner_node",
+                "test_refiner_node": "feedback_summarizer",
                 "final_triage": "final_triage_router", # <-- 转到“最终裁决”
                 "end": END
             }
@@ -171,7 +173,7 @@ class TestGenerationWorkflow:
             "mutation_test_node",
             self.mutation_test_router,
             {
-                "test_refiner_node": "test_refiner_node", # 变异测试失败也送去修复
+                "test_refiner_node": "feedback_summarizer", # 变异测试失败也送去修复
                 "end": END
             }
         )
