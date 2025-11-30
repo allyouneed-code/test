@@ -1,5 +1,4 @@
-# src/report/docx_reporter.py
-
+# src/report/reporter_docx.py
 import json
 import os
 import time
@@ -10,37 +9,38 @@ from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
 
 class DocxWorkflowReporter:
-    """
-    [Word版] 生成详尽的测试报告，完整可视化 M_req=(U,I,B,C) 和 M_code=(A,S,G)。
-    """
-    def __init__(self, state: dict, output_filename: str = "test_report/Test_Generation_Report.docx"):
+    def __init__(self, state: dict, output_filename: str):
         self.state = state
         self.output_filename = output_filename
         self.doc = Document()
         self._setup_styles()
 
     def _setup_styles(self):
-        """配置中文字体和基础样式"""
         style = self.doc.styles['Normal']
         style.font.name = 'Times New Roman'
         style.element.rPr.rFonts.set(qn('w:eastAsia'), '微软雅黑')
         style.font.size = Pt(10.5)
-        
-        # 设置标题样式颜色（可选，类似 Word 默认蓝）
         for i in range(1, 4):
             if f'Heading {i}' in self.doc.styles:
                 self.doc.styles[f'Heading {i}'].font.color.rgb = RGBColor(46, 116, 181)
 
     def generate(self):
-        print("  -> 正在生成 Word 报告 (包含完整节点信息)...")
+        print("  -> 正在组装 Word 报告...")
+        
+        # 1. 标题
         self._add_title()
+        
+        # 2. 项目输入信息 (新增)
+        self._add_project_info()
+
+        # 3. 执行摘要 (紧接其后，不分页)
         self._add_summary()
         
         # 加载数据
         req_data = self._load_json(self.state.get('structured_requirement', '{}'))
         code_data = self._load_json(self.state.get('analysis_report', '{}'))
         
-        # 2. 需求模型
+        # 4. 需求模型
         self.doc.add_heading('2. 需求模型分析 (M_req)', level=1)
         if req_data:
             self._add_req_U_unit_under_test(req_data)
@@ -50,38 +50,100 @@ class DocxWorkflowReporter:
         else:
             self.doc.add_paragraph("需求模型数据为空。")
 
-        # 3. 代码模型
+        # 5. 代码模型
         self.doc.add_heading('3. 代码模型分析 (M_code)', level=1)
         self.doc.add_heading('3.1 源代码快照', level=2)
         self._add_code_block(self.state.get('code', ''))
-        
         if code_data:
             self._add_code_A_unit_info(code_data)
             self._add_code_S_static_interface(code_data)
             self._add_code_G_control_flow(code_data)
-        else:
-            self.doc.add_paragraph("代码分析数据为空。")
 
-        # 4. 验证与测试
+        # 6. 验证与测试
         self._add_validation_section()
         self._add_traceability_matrix()
         self._add_test_code_section()
         
         try:
-            output_dir = os.path.dirname(self.output_filename)
-            if output_dir: # 仅当路径包含目录时才创建
-                os.makedirs(output_dir, exist_ok=True)
-                
             self.doc.save(self.output_filename)
-            print(f"[Report] Word document generated: {os.path.abspath(self.output_filename)}")
+            print(f"[Report] Document saved: {self.output_filename}")
         except Exception as e:
-            print(f"[Report] Error saving document: {e}")
+            print(f"[Report] Save failed: {e}")
 
     def _load_json(self, json_str):
-        try:
-            return json.loads(json_str)
-        except:
-            return None
+        try: return json.loads(json_str)
+        except: return None
+
+    # --- 核心修改部分 ---
+
+    def _add_title(self):
+        """添加主标题"""
+        # 使用被测件名称作为主标题的一部分，或者作为副标题
+        target_name = self.state.get('target_name', '未命名项目')
+        heading = self.doc.add_heading(f'自动化测试报告: {target_name}', 0)
+        heading.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        
+        p = self.doc.add_paragraph()
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        p.add_run(f"生成时间: {time.strftime('%Y-%m-%d %H:%M:%S')}").font.color.rgb = RGBColor(128,128,128)
+        
+        # 关键点：这里不再调用 self.doc.add_page_break()
+
+    def _add_project_info(self):
+        """新增：在报告最前方展示输入信息"""
+        self.doc.add_heading('0. 测试对象信息', level=1)
+        
+        table = self.doc.add_table(rows=0, cols=2)
+        table.style = 'Table Grid'
+        
+        # 1. 被测件名称
+        self._add_table_row(table, "被测件标识 (Target)", self.state.get('target_name', 'N/A'))
+        # 2. 需求文件来源
+        self._add_table_row(table, "需求文档来源", self.state.get('req_filename', 'N/A'))
+        # 3. 代码文件来源
+        self._add_table_row(table, "代码文件来源", self.state.get('code_filename', 'N/A'))
+        
+        self.doc.add_paragraph("") # 空行分隔
+
+    # --- 以下方法保持原样 (略去部分实现细节以节省篇幅) ---
+
+    def _add_summary(self):
+        self.doc.add_heading('1. 执行摘要', level=1)
+        table = self.doc.add_table(rows=0, cols=2)
+        table.style = 'Table Grid'
+        self._add_table_row(table, "最终结果", self.state.get('evaluation_result', 'N/A'))
+        self._add_table_row(table, "覆盖率", f"{self.state.get('coverage', 0.0):.2%}")
+        self._add_table_row(table, "通过率", f"{self.state.get('pass_rate', 0.0):.2%}")
+        self._add_table_row(table, "发现缺陷数 (F-Cases)", str(self.state.get('test_failures', 0)))
+        self._add_table_row(table, "执行耗时", f"{self.state.get('total_execution_time', 0):.2f}s")
+
+    def _add_table_row(self, table, col1, col2):
+        row = table.add_row()
+        row.cells[0].text = str(col1)
+        row.cells[1].text = str(col2)
+
+    # ... (其余 _add_req_U_..., _add_code_A_..., 等方法与之前版本一致) ...
+    
+    # 为了代码完整性，包含必要的辅助方法
+    def _set_table_header(self, table, headers):
+        hdr_cells = table.rows[0].cells
+        for i, text in enumerate(headers):
+            if i < len(hdr_cells):
+                hdr_cells[i].text = text
+                hdr_cells[i].paragraphs[0].runs[0].bold = True
+
+    def _add_code_block(self, text):
+        table = self.doc.add_table(rows=1, cols=1)
+        cell = table.cell(0, 0)
+        shading_elm = OxmlElement('w:shd')
+        shading_elm.set(qn('w:val'), 'clear')
+        shading_elm.set(qn('w:fill'), 'F2F2F2')
+        cell._tc.get_or_add_tcPr().append(shading_elm)
+        p = cell.paragraphs[0]
+        p.text = text
+        for run in p.runs:
+            run.font.name = 'Courier New'
+            run.font.size = Pt(9)
 
     # ================= M_req 部分 =================
 
@@ -175,7 +237,7 @@ class DocxWorkflowReporter:
             
             self.doc.add_paragraph("")
 
-    # ================= M_code 部分 =================
+    # ================= M_code 部分 (保持不变) =================
 
     def _add_code_A_unit_info(self, data):
         """3.2 单元信息 (A)"""
@@ -211,7 +273,7 @@ class DocxWorkflowReporter:
                 self.doc.add_paragraph(f"调用: {call.get('target_signature', '')}", style='List Bullet')
 
     def _add_code_G_control_flow(self, data):
-        """3.4 控制流与谓词 (G - CFG) - [完善版]"""
+        """3.4 控制流与谓词 (G - CFG)"""
         self.doc.add_heading('3.4 控制流与谓词 (G - CFG)', level=2)
         g_model = data.get('G', {})
         
@@ -273,7 +335,7 @@ class DocxWorkflowReporter:
              for ep in exit_points:
                  self.doc.add_paragraph(f"• 节点 {ep.get('node_id')} -> {ep.get('exit_type')}", style='List Bullet')
 
-    # ================= 通用辅助方法 =================
+    # ================= 通用辅助方法 (保持不变) =================
 
     def _add_validation_section(self):
         """4. 验证结果"""
@@ -313,13 +375,6 @@ class DocxWorkflowReporter:
     def _add_test_code_section(self):
         self.doc.add_heading('5. 最终测试代码', level=1)
         self._add_code_block(self.state.get('test_code', ''))
-
-    def _add_title(self):
-        self.doc.add_heading('自动化单元测试生成报告', 0).alignment = WD_ALIGN_PARAGRAPH.CENTER
-        p = self.doc.add_paragraph()
-        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        p.add_run(f"生成时间: {time.strftime('%Y-%m-%d %H:%M:%S')}").font.color.rgb = RGBColor(128,128,128)
-        self.doc.add_page_break()
 
     def _add_summary(self):
         self.doc.add_heading('1. 执行摘要', level=1)
@@ -427,12 +482,9 @@ class DocxWorkflowReporter:
                 if sid: req_info[sid] = s.get('description', 'N/A')
 
         # --- 3. 绘制 Word 表格 (4列) ---
-        # 列定义: ID | 描述 | 状态 | 测试用例
         table = self.doc.add_table(rows=1, cols=4)
         table.style = 'Table Grid'
         
-        # 设置固定列宽 (总宽约 6-6.5 英寸)
-        # 需要确保 import Inches: from docx.shared import Inches
         table.autofit = False 
         table.columns[0].width = Inches(1.2) # ID
         table.columns[1].width = Inches(2.8) # 描述 (最宽)
@@ -447,21 +499,11 @@ class DocxWorkflowReporter:
             test_cases = mapping.get(rid, [])
             
             status = "已覆盖" if test_cases else "缺失"
-            cases_str = "\n".join(test_cases) if test_cases else "---" # 用换行符分隔多个用例更美观
+            cases_str = "\n".join(test_cases) if test_cases else "---" 
             
-            # 添加行
             self._add_table_row(table, rid, desc, status, cases_str)
             
-            # (可选优化) 如果缺失，将"状态"列标红
-            # 这里的 _add_table_row 是通用的，如果需要特定标红逻辑，可以单独写
-            if not test_cases:
-                # 获取刚才添加的那一行
-                row_cells = table.rows[-1].cells
-                # 将"缺失"二字标红 (需要更底层的 run 操作，这里简单演示思路)
-                # paragraphs[0].runs[0].font.color.rgb = RGBColor(255, 0, 0)
-                pass
-
-        # --- 4. 检查幻觉 ID (代码里写了但需求里没有的) ---
+        # --- 4. 检查幻觉 ID ---
         extra_ids = set(mapping.keys()) - set(req_info.keys())
         if extra_ids:
             self.doc.add_paragraph("") # 空行

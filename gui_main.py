@@ -5,10 +5,9 @@ import threading
 import sys
 import os
 
-# 导入您在 main.py 中重构的函数和原始帮助函数
+# 导入 main.py 中的函数
 from main import run_workflow, read_requirements_from_docx, read_file_content
 
-# 确保 src 目录在 Python 路径中
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(current_dir)
 
@@ -16,132 +15,130 @@ class WorkflowGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("自动化测试生成工具")
-        self.root.geometry("800x600")
+        self.root.geometry("800x650")
 
         self.req_file_path = tk.StringVar()
         self.code_file_path = tk.StringVar()
+        self.target_name = tk.StringVar()
 
-        # --- 1. 文件选择 ---
-        frame_files = tk.Frame(root, pady=10)
-        frame_files.pack(fill="x")
+        # --- 使用 Grid 布局的容器 Frame ---
+        # Grid 是解决对齐问题最稳健的方法：
+        # 第0列放标签，第1列放输入框，第2列放按钮
+        input_frame = tk.Frame(root, pady=15, padx=15)
+        input_frame.pack(fill="x")
 
-        tk.Label(frame_files, text="需求文件 (.docx):").pack(side=tk.LEFT, padx=5)
-        tk.Entry(frame_files, textvariable=self.req_file_path, width=50).pack(side=tk.LEFT, fill="x", expand=True)
-        tk.Button(frame_files, text="浏览...", command=self.load_req_file).pack(side=tk.LEFT, padx=5)
+        # 配置列权重，让中间的输入框(第1列)自动拉伸填满空间
+        input_frame.grid_columnconfigure(1, weight=1)
 
-        frame_code = tk.Frame(root, pady=5)
-        frame_code.pack(fill="x")
+        # --- Row 0: 被测件名称 ---
+        # 移除加粗，使用默认字体或统一字体
+        tk.Label(input_frame, text="被测件名称:", anchor="w").grid(row=0, column=0, sticky="w", pady=5)
+        tk.Entry(input_frame, textvariable=self.target_name).grid(row=0, column=1, sticky="ew", pady=5, padx=5)
+        # 第一行没有按钮，所以不需要 column=2
 
-        tk.Label(frame_code, text="源代码文件 (.py):").pack(side=tk.LEFT, padx=5)
-        tk.Entry(frame_code, textvariable=self.code_file_path, width=50).pack(side=tk.LEFT, fill="x", expand=True)
-        tk.Button(frame_code, text="浏览...", command=self.load_code_file).pack(side=tk.LEFT, padx=5)
+        # --- Row 1: 需求文件 ---
+        tk.Label(input_frame, text="需求文件 (.docx):", anchor="w").grid(row=1, column=0, sticky="w", pady=5)
+        tk.Entry(input_frame, textvariable=self.req_file_path).grid(row=1, column=1, sticky="ew", pady=5, padx=5)
+        tk.Button(input_frame, text="浏览...", command=self.load_req_file).grid(row=1, column=2, sticky="e", pady=5)
 
-        # --- 2. 运行按钮 ---
-        self.run_button = tk.Button(root, text="开始分析", command=self.start_analysis_thread, font=("Arial", 12, "bold"), bg="green", fg="white")
-        self.run_button.pack(pady=10, fill="x", padx=10)
+        # --- Row 2: 源代码文件 ---
+        tk.Label(input_frame, text="源代码文件 (.py):", anchor="w").grid(row=2, column=0, sticky="w", pady=5)
+        tk.Entry(input_frame, textvariable=self.code_file_path).grid(row=2, column=1, sticky="ew", pady=5, padx=5)
+        tk.Button(input_frame, text="浏览...", command=self.load_code_file).grid(row=2, column=2, sticky="e", pady=5)
 
-        # --- 3. 输出控制台 ---
-        tk.Label(root, text="工作流输出:").pack(anchor="w", padx=10)
-        self.console_output = scrolledtext.ScrolledText(root, wrap=tk.WORD, state="disabled", height=25)
-        self.console_output.pack(pady=10, padx=10, fill="both", expand=True)
+        # --- 4. 运行按钮 ---
+        self.run_button = tk.Button(root, text="开始生成测试", command=self.start_analysis_thread, 
+                                    font=("Arial", 12, "bold"), bg="#4CAF50", fg="white")
+        self.run_button.pack(pady=10, fill="x", padx=20)
 
-        # --- 4. 重定向 stdout ---
+        # --- 5. 输出控制台 ---
+        tk.Label(root, text="执行日志:").pack(anchor="w", padx=10)
+        self.console_output = scrolledtext.ScrolledText(root, wrap=tk.WORD, state="disabled", height=20)
+        self.console_output.pack(pady=5, padx=10, fill="both", expand=True)
+
         self.stdout_redirector = TextRedirector(self.console_output)
         
     def load_req_file(self):
         path = filedialog.askopenfilename(filetypes=[("Word 文档", "*.docx")])
-        if path:
-            self.req_file_path.set(path)
+        if path: self.req_file_path.set(path)
 
     def load_code_file(self):
         path = filedialog.askopenfilename(filetypes=[("Python 文件", "*.py")])
-        if path:
-            self.code_file_path.set(path)
+        if path: self.code_file_path.set(path)
 
     def start_analysis_thread(self):
         req_path = self.req_file_path.get()
         code_path = self.code_file_path.get()
+        target_name_val = self.target_name.get().strip()
 
+        if not target_name_val:
+            messagebox.showwarning("提示", "请输入被测件名称 (用于生成报告标题)。")
+            return
         if not req_path or not code_path:
-            messagebox.showerror("错误", "请同时选择需求文件和源代码文件。")
+            messagebox.showerror("错误", "请选择需求文件和源代码文件。")
             return
 
-        # 禁用按钮，防止重复点击
-        self.run_button.config(text="正在运行... 请稍候 ...", state="disabled")
-        
-        # 清空控制台
+        # UI 交互锁定
+        self.run_button.config(text="正在运行...", state="disabled")
         self.console_output.config(state="normal")
         self.console_output.delete(1.0, tk.END)
         self.console_output.config(state="disabled")
 
-        # 将 stdout 重定向到我们的文本框
+        # 重定向输出
         sys.stdout = self.stdout_redirector
         sys.stderr = self.stdout_redirector
 
-        # 在新线程中运行工作流，以防GUI冻结
+        # 启动后台线程
         thread = threading.Thread(
             target=self.run_workflow_in_background, 
-            args=(code_path, req_path),
+            args=(code_path, req_path, target_name_val),
             daemon=True
         )
         thread.start()
 
-    def run_workflow_in_background(self, code_path, req_path):
-        """这个函数在后台线程中运行"""
+    def run_workflow_in_background(self, code_path, req_path, target_name):
+        """后台执行逻辑"""
         try:
-            # 1. 从文件读取内容
-            print(f"读取需求: {req_path}")
+            print(f"正在读取文件...")
             req_text = read_requirements_from_docx(req_path)
-            
-            print(f"读取代码: {code_path}")
             code_text = read_file_content(code_path)
 
-            # 2. 调用重构后的核心函数
-            run_workflow(code_text, req_text)
+            # 调用核心逻辑，传入文件名和被测件名称
+            run_workflow(
+                code_text=code_text, 
+                requirement_text=req_text,
+                req_filename=os.path.basename(req_path),
+                code_filename=os.path.basename(code_path),
+                target_name=target_name
+            )
 
         except Exception as e:
-            # 确保即使线程崩溃，错误也会被打印到GUI
-            print(f"\n❌ GUI 线程中发生严重错误: {e}")
+            print(f"\n❌ 错误: {e}")
             import traceback
             traceback.print_exc()
         finally:
-            # 恢复 stdout 并重新启用按钮
-            # 我们必须使用 root.after 确保这些 GUI 操作在主线程中执行
             self.root.after(0, self.on_workflow_complete)
 
     def on_workflow_complete(self):
-        """在主线程中恢复GUI状态"""
-        sys.stdout = sys.__stdout__  # 恢复标准输出
+        sys.stdout = sys.__stdout__
         sys.stderr = sys.__stderr__
-        self.run_button.config(text="开始分析", state="normal")
-        messagebox.showinfo("完成", "工作流执行完毕！")
+        self.run_button.config(text="开始生成测试", state="normal")
+        messagebox.showinfo("完成", "测试报告生成完毕！")
 
 
 class TextRedirector:
-    """一个辅助类，用于将 print 语句重定向到 Tkinter 文本框"""
     def __init__(self, widget):
         self.widget = widget
-
     def write(self, text):
-        # 确保 GUI 更新在主线程中
-        def update_gui():
+        def update():
             self.widget.config(state="normal")
             self.widget.insert(tk.END, text)
-            self.widget.see(tk.END) # 自动滚动到底部
+            self.widget.see(tk.END)
             self.widget.config(state="disabled")
-        
-        # 使用 root.after 将 GUI 更新调度到主线程
-        self.widget.master.after(0, update_gui)
-
-    def flush(self):
-        pass # Pytest/Coverage 可能需要这个
-
+        self.widget.master.after(0, update)
+    def flush(self): pass
 
 if __name__ == "__main__":
-    # 确保 src 目录在路径中
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    sys.path.append(os.path.join(current_dir, 'src'))
-
     root = tk.Tk()
     app = WorkflowGUI(root)
     root.mainloop()
